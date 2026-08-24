@@ -68,6 +68,33 @@ def test_append_reopens_typed_events(tmp_path: Path) -> None:
     reopened_store.close()
 
 
+def test_event_store_redacts_host_paths_in_user_message_when_workspace_root_given(
+    tmp_path: Path,
+) -> None:
+    # When the store knows the workspace root, free-text fields are persisted
+    # under the durable-text policy so host paths do not reach the on-disk
+    # transcript. (session_started.workspace keeps credential-only redaction so
+    # resume can still match it against metadata.)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    event_path = tmp_path / "events.jsonl"
+    store = EventStore.open(event_path, workspace_root=workspace)
+    store.append(
+        session_id="session",
+        data=UserMessageData(content=f"review {workspace}/src/secret.py please"),
+    )
+    store.close()
+
+    reopened = EventStore.open(event_path)
+    persisted = reopened.events[0].data
+    reopened.close()
+
+    assert isinstance(persisted, UserMessageData)
+    assert "<workspace-root>/src/secret.py" in persisted.content
+    assert str(workspace) not in persisted.content
+    assert "please" in persisted.content
+
+
 def test_append_without_cycle_id_inherits_the_latest_persisted_cycle(tmp_path: Path) -> None:
     event_path = tmp_path / "events.jsonl"
     store = EventStore.open(event_path)

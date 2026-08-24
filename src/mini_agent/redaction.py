@@ -82,6 +82,22 @@ _PATTERNS = (
         ),
     ),
     (
+        # A bare ``Bearer <token>`` / ``Basic <token>`` in prose, with no
+        # ``Authorization:`` prefix, is not covered by the pattern above. The
+        # 16-char token-charset minimum avoids short prose ("bearer of",
+        # "basic authentication"); the lookahead requires at least one
+        # non-alphabetic token character (digit or . _ ~ + / =) so longer prose
+        # compounds such as "basic internationalization" or "basic
+        # cross-functional" stay intact while opaque bearer values
+        # (ya29.*, base64 blobs) are still redacted.
+        RedactionKind.AUTHORIZATION,
+        re.compile(
+            r"(?i)\b(?:bearer|basic)\s+"
+            r"(?=[A-Za-z0-9._~+/=_-]*[0-9._~+/=_])"
+            r"[A-Za-z0-9._~+/=_-]{16,}"
+        ),
+    ),
+    (
         RedactionKind.NAMED_SECRET,
         re.compile(r"(?im)(\bcookie\s*:\s*)[^\r\n]+"),
     ),

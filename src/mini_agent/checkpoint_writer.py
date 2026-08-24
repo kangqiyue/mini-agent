@@ -318,6 +318,16 @@ class DeterministicCheckpointExtractor:
         acceptance_criteria = list(
             previous.acceptance_criteria if previous is not None else ()
         )
+        # Model-owned state the deterministic extractor cannot derive from raw
+        # events. Carry it forward from the previous checkpoint so a fallback
+        # extraction does not silently drop constraints, blockers, the task
+        # tree, planned next actions, cross-task findings, or key decisions.
+        constraints = list(previous.constraints_and_preferences if previous is not None else ())
+        task_tree = list(previous.task_tree if previous is not None else ())
+        blocked = list(previous.blocked if previous is not None else ())
+        next_actions = list(previous.next_actions if previous is not None else ())
+        cross_task_findings = list(previous.cross_task_findings if previous is not None else ())
+        key_decisions = list(previous.key_decisions if previous is not None else ())
 
         for event in events:
             data = event.data
@@ -356,6 +366,12 @@ class DeterministicCheckpointExtractor:
             artifact_references=_bounded_items(artifacts),
             runtime_state=_bounded_items(runtime_state),
             miscellaneous_notes=_bounded_items(notes),
+            constraints_and_preferences=_bounded_items(constraints),
+            task_tree=_bounded_items(task_tree),
+            blocked=_bounded_items(blocked),
+            next_actions=_bounded_items(next_actions),
+            cross_task_findings=_bounded_items(cross_task_findings),
+            key_decisions=_bounded_items(key_decisions),
             writer_model=self._writer_model,
             created_at=events[-1].timestamp,
         )

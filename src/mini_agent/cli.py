@@ -25,6 +25,12 @@ from mini_agent.config_template import (
     ConfigInitializationError,
     initialize_workspace_config,
 )
+from mini_agent.config_trust import (
+    WorkspaceConfigUntrustedError,
+    is_untrusted_workspace_config,
+    is_workspace_trusted,
+    trust_workspace,
+)
 from mini_agent.context import (
     ContextConfigurationError,
     Utf8TokenEstimator,
@@ -91,6 +97,16 @@ ConfigOption = Annotated[
 WorkspaceOption = Annotated[
     Path | None,
     typer.Option("--workspace", help="Workspace used for project config and session metadata."),
+]
+TrustOption = Annotated[
+    bool,
+    typer.Option(
+        "--trust-workspace-config",
+        help=(
+            "Trust this workspace's .mini-agent/config.toml, which can redirect the "
+            "agent credential and provider endpoint, without an interactive prompt."
+        ),
+    ),
 ]
 
 
@@ -171,10 +187,13 @@ def init_config(workspace: WorkspaceOption = None) -> None:
 def chat(
     workspace: WorkspaceOption = None,
     config_path: ConfigOption = None,
+    trust_workspace_config: TrustOption = False,
 ) -> None:
     """Start chat and persist a session only when work begins."""
     resolved_workspace = _resolve_workspace(workspace)
-    config = _load_runtime_config(resolved_workspace, config_path)
+    config = _load_runtime_config(
+        resolved_workspace, config_path, trust_workspace_config=trust_workspace_config
+    )
     pending_setup = _prepare_pending_chat(config, resolved_workspace)
     try:
         pending_result = _run_pending_chat(
@@ -256,10 +275,13 @@ def resume(
     ] = None,
     workspace: WorkspaceOption = None,
     config_path: ConfigOption = None,
+    trust_workspace_config: TrustOption = False,
 ) -> None:
     """Resume a session, defaulting to the latest one in this workspace."""
     resolved_workspace = _resolve_workspace(workspace)
-    config = _load_runtime_config(resolved_workspace, config_path)
+    config = _load_runtime_config(
+        resolved_workspace, config_path, trust_workspace_config=trust_workspace_config
+    )
     data_dir = resolve_data_dir(config)
     if session_id is None:
         matching_sessions = _matching_sessions(
@@ -326,7 +348,9 @@ def show_sessions(
     config_path: ConfigOption = None,
 ) -> None:
     """List locally persisted sessions."""
-    config = _load_runtime_config(_resolve_workspace(workspace), config_path)
+    config = _load_runtime_config(
+        _resolve_workspace(workspace), config_path, enforce_workspace_trust=False
+    )
     summaries = tuple(
         summary
         for summary in _discover_readable_sessions(resolve_data_dir(config))
@@ -354,7 +378,9 @@ def inspect(
     config_path: ConfigOption = None,
 ) -> None:
     """Show event metadata without printing message bodies."""
-    config = _load_runtime_config(_resolve_workspace(workspace), config_path)
+    config = _load_runtime_config(
+        _resolve_workspace(workspace), config_path, enforce_workspace_trust=False
+    )
     try:
         session = AgentSession.load(data_dir=resolve_data_dir(config), session_id=session_id)
     except _SESSION_UNREADABLE_ERRORS:
@@ -388,7 +414,9 @@ def evaluate(
 ) -> None:
     """Evaluate durable retention/recovery without calling a model or tools."""
 
-    config = _load_runtime_config(_resolve_workspace(workspace), config_path)
+    config = _load_runtime_config(
+        _resolve_workspace(workspace), config_path, enforce_workspace_trust=False
+    )
     try:
         session = AgentSession.load(data_dir=resolve_data_dir(config), session_id=session_id)
     except _SESSION_UNREADABLE_ERRORS:
@@ -445,12 +473,36 @@ def benchmark(
     typer.echo(report.model_dump_json(indent=2))
 
 
-def _load_runtime_config(workspace: Path, config_path: Path | None) -> MiniAgentConfig:
-    """Load config without allowing parser diagnostics to expose its contents."""
+def _load_runtime_config(
+    workspace: Path,
+    config_path: Path | None,
+    *,
+    trust_workspace_config: bool = False,
+    enforce_workspace_trust: bool = True,
+) -> MiniAgentConfig:
+    """Load config without allowing parser diagnostics to expose its contents.
+
+    Only the agent-running commands (chat, resume) enforce the workspace-config
+    trust gate, because only they can exfiltrate a credential through the
+    provider. Read-only commands (sessions, inspect, evaluate) load the config
+    without the gate.
+    """
 
     try:
         resolved_config_path = find_config_path(workspace, config_path)
+        if enforce_workspace_trust:
+            _require_workspace_config_trust(
+                workspace=workspace,
+                resolved=resolved_config_path,
+                trust_workspace_config=trust_workspace_config,
+            )
         return load_config(resolved_config_path)
+    except WorkspaceConfigUntrustedError:
+        raise typer.BadParameter(
+            "Workspace .mini-agent/config.toml is not trusted. Run interactively to "
+            "confirm, or pass --trust-workspace-config.",
+            param_hint="--trust-workspace-config",
+        ) from None
     except (
         ConfigNotFoundError,
         OSError,
@@ -464,6 +516,38 @@ def _load_runtime_config(workspace: Path, config_path: Path | None) -> MiniAgent
             "Configuration could not be loaded safely.",
             param_hint="--config",
         ) from None
+
+
+def _require_workspace_config_trust(
+    *,
+    workspace: Path,
+    resolved: Path,
+    trust_workspace_config: bool,
+) -> None:
+    """Refuse an untrusted workspace config unless the user has opted in.
+
+    A workspace config can redirect the agent credential and provider endpoint to
+    an attacker host, whether it is auto-loaded or reached via an explicit
+    ``--config`` that resolves to it. Require an explicit, recorded decision
+    before loading it.
+    """
+    if not is_untrusted_workspace_config(resolved, workspace):
+        return
+    if trust_workspace_config:
+        if not is_workspace_trusted(workspace):
+            trust_workspace(workspace)
+        return
+    if is_workspace_trusted(workspace):
+        return
+    if not _is_interactive_terminal():
+        raise WorkspaceConfigUntrustedError("workspace config is untrusted")
+    typer.echo(
+        "This workspace's .mini-agent/config.toml can redirect the agent's "
+        "credential and provider endpoint to an arbitrary host."
+    )
+    if not typer.confirm("Trust this workspace's config", default=False):
+        raise WorkspaceConfigUntrustedError("workspace config was not trusted")
+    trust_workspace(workspace)
 
 
 def _matching_sessions(
@@ -901,6 +985,16 @@ async def _run_interactive(
                 )
                 stop_reason = "turn_failure"
                 continue
+            except (asyncio.CancelledError, KeyboardInterrupt):
+                # Ctrl-C while the model is thinking is delivered inside the
+                # coroutine as asyncio.CancelledError (asyncio.run only re-raises
+                # KeyboardInterrupt at its own boundary afterward). Absorb it
+                # here and stop the session cleanly so the terminal event is
+                # recorded and the writer lock released, instead of aborting past
+                # session.finalize() and leaving the session unresumable.
+                typer.echo("Interrupted; stopping the session.", err=True)
+                stop_reason = "user_interrupt"
+                break
             if response.content is not None:
                 ui.show_assistant(response.content)
     finally:
@@ -1101,7 +1195,7 @@ def _run_interactive_safely(
                 show_welcome=show_welcome,
             )
         )
-    except Exception:
+    except (Exception, KeyboardInterrupt):
         typer.echo("Agent session failed; resume the session before continuing.", err=True)
         result = InteractiveResult(stop_reason="turn_failure")
     try:

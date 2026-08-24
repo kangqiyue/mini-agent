@@ -393,3 +393,41 @@ def test_redact_json_text_falls_back_to_plain_text_for_invalid_json() -> None:
 
     assert "test-value" not in result.text
     assert result.text == '{"OPENAI_API_KEY":[REDACTED]'
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "request header: Bearer ya29.Gl0Bdabc-1234567890_abcdefghij",
+        "opaque: Bearer abcdefghijklmnop1234567890qrstuvwxyz",
+        "token=Bearer Zm9vYmFyYmF6MTIzNDU2Nzg5MDEyMzQ1",
+        "Basic Z2VuZXJpYzpwYXNzd29yZDEyMzQ1Njc4OQ==",
+    ],
+)
+def test_redact_text_redacts_bare_bearer_or_basic_token(text: str) -> None:
+    # A bearer/basic credential echoed in prose without an ``Authorization:``
+    # prefix must still be redacted; the 16-char token minimum keeps ordinary
+    # phrases intact.
+    result = redact_text(text)
+
+    assert "Bearer" not in result.text or "[REDACTED]" in result.text
+    assert "ya29" not in result.text
+    assert "abcdefghijklmnop1234567890qrstuvwxyz" not in result.text
+    assert "Zm9vYmFy" not in result.text
+    assert "Z2VuZXJpYzpwYXNz" not in result.text
+    assert result.match_count >= 1
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "bearer of bad news",
+        "basic authentication",
+        "basic knowledge required",
+        "basic internationalization",
+        "basic cross-functional",
+        "basic well-established",
+    ],
+)
+def test_redact_text_leaves_bearer_basic_prose_intact(text: str) -> None:
+    assert redact_text(text).match_count == 0

@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -879,6 +880,54 @@ async def test_resumed_interactive_session_replays_recent_conversation(
         "continue the previous task",
         "the previous result",
     ]
+    session.close()
+
+
+@pytest.mark.asyncio
+async def test_run_interactive_finalizes_session_on_keyboard_interrupt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Ctrl-C while the model is thinking must stop the session cleanly so the
+    # terminal event is recorded and the writer lock is released, instead of
+    # aborting past session.finalize() and leaving the session unresumable.
+    session = AgentSession.create(
+        data_dir=tmp_path / "data", workspace=tmp_path, model="test-model"
+    )
+    config = MiniAgentConfig.model_validate(
+        {
+            "model": {"model": "test-model", "base_url": "https://example.test/v1"},
+            "runtime": {"data_dir": tmp_path / "data"},
+        }
+    )
+
+    class FakeProvider:
+        async def aclose(self) -> None:
+            pass
+
+    def fake_provider(_config: object) -> FakeProvider:
+        return FakeProvider()
+
+    monkeypatch.setattr("mini_agent.cli.OpenAICompatibleProvider", fake_provider)
+    monkeypatch.setattr(
+        "mini_agent.agent.MiniAgent.run_turn",
+        AsyncMock(side_effect=asyncio.CancelledError()),
+    )
+
+    with (
+        patch("mini_agent.cli.TerminalChatUI.show_recent_conversation"),
+        patch("builtins.input", return_value="please continue the work"),
+        patch("mini_agent.cli.typer.echo"),
+    ):
+        result = await cli_module._run_interactive(  # pyright: ignore[reportPrivateUsage]
+            config,
+            session,
+            registrations=(),
+        )
+
+    assert result.stop_reason == "user_interrupt"
+    assert session.events[-1].data.kind == "session_stopped"
+    assert session.events[-1].data.reason == "user_interrupt"
     session.close()
 
 

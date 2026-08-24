@@ -179,19 +179,28 @@ class ExecCommandTool:
         return {"PATH": self._user_path, "LANG": "C", "LC_ALL": "C"}
 
     def _path_entries_for_cwd(self, cwd: str) -> tuple[Path, ...]:
-        """Interpret relative PATH entries from the command's working directory.
+        """Resolve PATH entries from the command's working directory.
 
-        ``Popen(..., cwd=...)`` makes a relative (including empty) PATH entry
-        relative to that directory in the child.  Resolve the initial executable
-        with the same rule, then pass that normalized PATH to the child so
-        nested command lookups retain identical semantics.
+        Relative (including empty) entries are interpreted from the command's
+        cwd, matching the child's PATH semantics. Absolute entries are searched
+        first so that an executable planted in the workspace cannot shadow a
+        system command when the host PATH places a ``.`` or empty entry ahead
+        of system directories. Workspace-only tool names still resolve from the
+        command cwd because no absolute entry provides them.
         """
         command_cwd = Path(cwd)
-        entries: list[Path] = []
+        absolute_entries: list[Path] = []
+        relative_entries: list[Path] = []
         for entry in self._user_path.split(os.pathsep):
-            path = Path(entry) if entry else command_cwd
-            entries.append(path if path.is_absolute() else command_cwd / path)
-        return tuple(entries)
+            if not entry:
+                relative_entries.append(command_cwd)
+                continue
+            path = Path(entry)
+            if path.is_absolute():
+                absolute_entries.append(path)
+            else:
+                relative_entries.append(command_cwd / path)
+        return (*absolute_entries, *relative_entries)
 
     def _capture_until_deadline(
         self,

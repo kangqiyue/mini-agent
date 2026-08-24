@@ -107,6 +107,29 @@ def test_exec_command_interprets_empty_path_entry_from_command_cwd(
     assert "path=\n" in result.content
 
 
+def test_exec_command_searches_absolute_path_entries_before_workspace_shadow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A ``.`` entry placed ahead of system directories must not let an
+    # executable planted in the workspace shadow a real command: absolute PATH
+    # entries are searched first, so the system binary wins even though a
+    # same-named file exists in the command cwd.
+    system_directory = tmp_path / "system"
+    workspace = tmp_path / "workspace"
+    commands = workspace / "commands"
+    system_directory.mkdir()
+    commands.mkdir(parents=True)
+    _write_executable(system_directory / "run-me", "printf 'system-bin\\n'\n")
+    _write_executable(commands / "run-me", "printf 'planted-workspace\\n'\n")
+    monkeypatch.setenv("PATH", f"{system_directory}:.")
+    tool = ExecCommandTool(Workspace(workspace))
+
+    result = tool.execute(_arguments(["run-me"], cwd="commands"))
+
+    assert "system-bin" in result.content
+    assert "planted-workspace" not in result.content
+
+
 def test_exec_command_reports_missing_executable_as_command_start_failure(tmp_path: Path) -> None:
     tool = ExecCommandTool(Workspace(tmp_path))
 

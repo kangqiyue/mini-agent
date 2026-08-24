@@ -683,3 +683,51 @@ async def test_deterministic_extractor_fits_multifield_previous_state_at_minimum
     assert checkpoint.current_intent
     assert checkpoint.writer_model == "deterministic-v1"
     session.close()
+
+
+@pytest.mark.asyncio
+async def test_deterministic_extractor_carries_forward_model_owned_fields(
+    tmp_path: Path,
+) -> None:
+    # The deterministic fallback cannot derive constraints, blockers, the task
+    # tree, next actions, cross-task findings, or key decisions from raw events,
+    # so it must carry them forward from the previous checkpoint instead of
+    # silently dropping them.
+    session = AgentSession.create(data_dir=tmp_path / "data", workspace=tmp_path, model="m")
+    item = CheckpointItem(text="历史状态", source_event_ids=(1,))
+    previous = Checkpoint(
+        checkpoint_id="c" * 32,
+        session_id=session.metadata.session_id,
+        cycle_id=1,
+        version=1,
+        source_from_event_id=1,
+        source_through_event_id=1,
+        current_intent="旧目标",
+        constraints_and_preferences=(item,),
+        task_tree=(item,),
+        blocked=(item,),
+        next_actions=(item,),
+        cross_task_findings=(item,),
+        key_decisions=(item,),
+        writer_model="model-like",
+        created_at=datetime.now(UTC),
+    )
+    session.append_user_message("继续", turn_id=session.new_turn_id())
+
+    checkpoint = await DeterministicCheckpointExtractor(maximum_bytes=65_536).extract(
+        previous=previous,
+        events=session.events,
+        source_from_event_id=1,
+        source_through_event_id=session.events[-1].id,
+        checkpoint_id="d" * 32,
+        version=2,
+        focus=None,
+    )
+
+    assert checkpoint.constraints_and_preferences == (item,)
+    assert checkpoint.task_tree == (item,)
+    assert checkpoint.blocked == (item,)
+    assert checkpoint.next_actions == (item,)
+    assert checkpoint.cross_task_findings == (item,)
+    assert checkpoint.key_decisions == (item,)
+    session.close()

@@ -165,7 +165,9 @@ class AgentSession:
         store: EventStore | None = None
         try:
             _write_metadata(staging_paths.metadata, metadata)
-            store = EventStore.open(staging_paths.events)
+            store = EventStore.open(
+                staging_paths.events, workspace_root=Path(canonical_workspace)
+            )
             store.append(
                 session_id=session_id,
                 data=SessionStartedData(workspace=metadata.workspace, model=model),
@@ -299,6 +301,7 @@ class AgentSession:
             paths.events,
             allow_recovery=allow_recovery,
             writable=allow_recovery,
+            workspace_root=Path(metadata.workspace),
         )
         try:
             is_recovered_empty_stream = (

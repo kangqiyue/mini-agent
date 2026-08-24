@@ -1,5 +1,7 @@
 """Credential redaction at the durable-event boundary."""
 
+from pathlib import Path
+
 from mini_agent.events import (
     ApprovalRequestedData,
     ApprovalResolvedData,
@@ -29,6 +31,7 @@ from mini_agent.events import (
     UserMessageData,
 )
 from mini_agent.exec_command_safety import sanitize_exec_command_arguments
+from mini_agent.host_path_redaction import redact_persisted_text
 from mini_agent.messages import FinishReason, ToolCall
 from mini_agent.redaction import RedactionResult, redact_json_text, redact_text
 from mini_agent.redaction_types import (
@@ -38,9 +41,20 @@ from mini_agent.redaction_types import (
 from mini_agent.tool_facts import ToolCompletionFacts
 
 
-def redact_event_data(data: EventData) -> tuple[EventData, RedactionSummary]:
-    """Return one redacted event payload and a non-sensitive audit summary."""
-    redactor = _EventRedactor()
+def redact_event_data(
+    data: EventData,
+    *,
+    workspace_root: Path | None = None,
+) -> tuple[EventData, RedactionSummary]:
+    """Return one redacted event payload and a non-sensitive audit summary.
+
+    When ``workspace_root`` is provided, free-text fields are also normalized
+    for durable storage (host paths replaced), matching the durable-text
+    policy. Integrity-checked identity fields (``session_started.workspace``
+    and ``model``) keep credential-only redaction so resume can still compare
+    them against session metadata verbatim.
+    """
+    redactor = _EventRedactor(workspace_root=workspace_root)
     if isinstance(data, ApprovalRequestedData):
         safe_data = data.model_copy(
             update={
@@ -52,7 +66,10 @@ def redact_event_data(data: EventData) -> tuple[EventData, RedactionSummary]:
         safe_data = data
     elif isinstance(data, SessionStartedData):
         safe_data = data.model_copy(
-            update={"workspace": redactor.text(data.workspace), "model": redactor.text(data.model)}
+            update={
+                "workspace": redactor.credential_text(data.workspace),
+                "model": redactor.credential_text(data.model),
+            }
         )
     elif isinstance(data, SessionResumedData):
         backup_name = data.recovery_backup_name
@@ -162,14 +179,28 @@ def redact_event_data(data: EventData) -> tuple[EventData, RedactionSummary]:
 class _EventRedactor:
     """Redact one event without retaining a second representation of secrets."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, workspace_root: Path | None = None) -> None:
+        self._workspace_root = workspace_root
         self._match_count = 0
         self._kinds: set[RedactionKind] = set()
 
     def text(self, value: str, *, truncated_at_end: bool = False) -> str:
+        if self._workspace_root is None:
+            return self._record(redact_text(value, truncated_at_end=truncated_at_end))
+        # Apply the durable-text policy: host paths plus credentials. This is
+        # idempotent over text already normalized at the provider boundary.
         return self._record(
-            redact_text(value, truncated_at_end=truncated_at_end)
+            redact_persisted_text(
+                value,
+                workspace_root=self._workspace_root,
+                truncated_at_end=truncated_at_end,
+            )
         )
+
+    def credential_text(self, value: str, *, truncated_at_end: bool = False) -> str:
+        # Credential-only redaction for integrity-checked identity fields that
+        # resume compares against session metadata verbatim.
+        return self._record(redact_text(value, truncated_at_end=truncated_at_end))
 
     def json_text(self, value: str) -> str:
         return self._record(redact_json_text(value))

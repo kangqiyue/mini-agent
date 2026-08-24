@@ -48,11 +48,13 @@ class EventStore:
         events: Sequence[StoredEvent],
         recovery_report: RecoveryReport,
         writer_lock_descriptor: int | None,
+        workspace_root: Path | None = None,
     ) -> None:
         self.path = path
         self._events = list(events)
         self.recovery_report = recovery_report
         self._writer_lock_descriptor = writer_lock_descriptor
+        self._workspace_root = workspace_root
         self._write_lock = threading.Lock()
         self._append_failure: BaseException | None = None
 
@@ -63,6 +65,7 @@ class EventStore:
         *,
         allow_recovery: bool = True,
         writable: bool = True,
+        workspace_root: Path | None = None,
     ) -> EventStore:
         if allow_recovery and not writable:
             raise ValueError("Tail recovery requires a writable event store")
@@ -102,6 +105,7 @@ class EventStore:
                 events=events,
                 recovery_report=recovery_report,
                 writer_lock_descriptor=writer_lock_descriptor,
+                workspace_root=workspace_root,
             )
         except BaseException:
             if writer_lock_descriptor is not None:
@@ -129,7 +133,9 @@ class EventStore:
                 raise RuntimeError(
                     "Cannot append after an I/O failure; close this store and resume or reopen it"
                 ) from self._append_failure
-            safe_data, redaction_summary = redact_event_data(data)
+            safe_data, redaction_summary = redact_event_data(
+                data, workspace_root=self._workspace_root
+            )
             current_cycle_id = self._events[-1].cycle_id if self._events else 1
             resolved_cycle_id = cycle_id
             if resolved_cycle_id is None:
@@ -438,6 +444,11 @@ def _open_regular_file(path: Path, flags: int, *, mode: int = 0o600) -> int:
 def _create_regular_file(path: Path) -> None:
     descriptor = _open_regular_file(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, mode=0o600)
     os.close(descriptor)
+    # Persist the new directory entry. fsyncing the file's data on append does
+    # not commit the filename-to-inode link, which lives in the parent directory;
+    # a crash within the journal commit window could otherwise leave already
+    # fsync'd events unreachable and silently lost on reopen.
+    _fsync_directory(path.parent)
 
 
 def _read_regular_bytes(path: Path) -> bytes:
