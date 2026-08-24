@@ -1,0 +1,79 @@
+# Copy this file to .mini-agent/config.toml, then replace only the provider values.
+# Keep credential values outside this file: api_key_env names an environment variable.
+
+[model]
+# Provider protocol. v0.1 supports only this OpenAI-compatible adapter.
+provider = "openai-compatible"
+# Provider model identifier; choose a non-local-path name accepted by the endpoint.
+model = "your-model-name"
+# Provider API root. Remote URLs require HTTPS; plain HTTP is allowed only for loopback.
+base_url = "https://provider.example/v1"
+# Name (not value) of the environment variable containing the API credential.
+api_key_env = "MINI_AGENT_API_KEY"
+# Physical model context window in tokens (minimum 4096); higher permits more history.
+context_window = 128000
+# Optional working-context cap in tokens (4096..context_window; default: unset).
+# Lower values rebuild or truncate sooner.
+# Runtime also preflights the actual system prompt and tools, so 4096 need not fit a full CLI request.
+# max_context = 100000
+# Optional model input cap in tokens (1..context_window; default: unset).
+# Lower values leave less room for requests.
+# max_input_tokens = 100000
+# Per-provider-call timeout in seconds (>0 and <=600); higher tolerates slow models but delays failure.
+timeout_seconds = 60.0
+# Desired response budget in tokens (>=1); higher leaves less request context after the reserve.
+max_output_tokens = 16384
+# Sampling temperature (0..2); lower is more repeatable, higher is more varied.
+temperature = 0.0
+
+[context]
+# Checkpoint trigger fractions: strictly increasing, >0, and each below rebuild_ratio.
+# Earlier milestones preserve state sooner but can consume more model calls when checkpoint_model is set.
+checkpoint_milestones = [0.20, 0.45, 0.70]
+# Rebuild active context at this utilization ratio (0..1); lower rebuilds sooner, higher risks crowding.
+rebuild_ratio = 0.85
+# Output reserve in tokens (>=1); higher protects response space but reduces request input capacity.
+reserve_tokens = 16384
+# Maximum seed history for a rebuilt context in tokens (>=1); higher retains more history but costs context.
+rebuild_seed_max_tokens = 65536
+# Checkpoint-model response budget in tokens (>=1024); higher permits richer summaries but costs output budget.
+checkpoint_max_tokens = 4096
+# Durable checkpoint size cap in UTF-8 bytes (4096..1048576), separate from token budgets.
+# Higher allows larger stored summaries; it does not increase model context capacity.
+checkpoint_max_bytes = 65536
+# Optional model identifier for checkpoint extraction (default: unset).
+# It shares the turn call limit and falls back to
+# deterministic extraction after expected provider, output, or validation failures.
+# checkpoint_model = "your-checkpoint-model"
+# Minimum usable request input in tokens (>=256); higher rejects cramped configurations earlier.
+minimum_input_tokens = 1024
+
+[runtime]
+# Optional data directory (default: unset). Relative paths are resolved from the directory containing this config file;
+# an absolute path stays absolute.
+# The directory holds local session state and is excluded from built-in file tools; an approved command
+# still has the current user's OS access. Keep this directory private and durable.
+# `data_dir = "data"` resolves to `.mini-agent/data/`, which this repository ignores. If you choose another
+# repository-local path, add that path to your project's Git ignore rules before using it.
+# data_dir = "data"
+# Retries after the initial provider call (0..10); more may overcome transient faults but use call budget/time.
+provider_retry_count = 2
+# Delay between retries in seconds (0..30); higher reduces retry pressure but makes failures slower.
+retry_backoff_seconds = 0.25
+# Hard total provider-call budget per turn (1..500), shared by main calls, retries, and checkpoint_model calls.
+max_model_calls_per_turn = 50
+# Maximum tool-result text embedded in model context in characters (1..1000000).
+# Higher gives the model more detail but consumes context; larger CLI results are stored as local artifacts.
+inline_tool_result_max_chars = 12000
+
+[system_prompt]
+# Stable system identity (1..2048 characters); keep it short so more context remains for the task.
+identity = "You are Mini Agent, a local coding agent. Work in the current workspace through explicit, verifiable actions."
+# Optional workspace-relative instructions path (default: unset); absolute paths and '..' are rejected.
+# Files exceeding maximum_instructions_chars are rejected before request assembly.
+# instructions_file = "PROJECT_INSTRUCTIONS.md"
+# Include concise Git ref metadata in the system prompt; this does not inspect working-tree status.
+# Disable it to reduce context use or avoid automatic Git metadata exposure.
+include_git_status = true
+# Character cap for the UTF-8 instructions file (1024..262144); higher allows more guidance but uses context.
+maximum_instructions_chars = 32768

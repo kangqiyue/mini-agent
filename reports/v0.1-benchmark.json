@@ -1,0 +1,158 @@
+{
+  "benchmark_id": "v0_1_deterministic_coding",
+  "cost_status": "unavailable",
+  "human_evaluation_status": "unavailable",
+  "limitations": [
+    "The provider is deterministic; this report does not measure stochastic model quality.",
+    "Provider token usage and price data are unavailable, so cost is not estimated.",
+    "Human evaluation was not supplied."
+  ],
+  "passed_task_count": 3,
+  "provider_usage_status": "unavailable",
+  "schema_version": 1,
+  "success_rate": 1.0,
+  "task_count": 3,
+  "tasks": [
+    {
+      "duration_seconds": 0.49224962503649294,
+      "evaluation": {
+        "checkpoint_count": 3,
+        "cost_status": "unavailable",
+        "cost_usd": null,
+        "critical_constraint_exact_recall": 1.0,
+        "cycle_count": 4,
+        "end_task_success": true,
+        "estimated_request_tokens": 14826,
+        "event_count": 42,
+        "exact_detail_recall": 0.0,
+        "false_completion_rate": 0.0,
+        "fixture_id": "fix_increment",
+        "history_recoverable_atom_ids": [
+          "constraint",
+          "exact_detail",
+          "retrieval_target",
+          "completion_evidence"
+        ],
+        "human_evaluation_status": "unavailable",
+        "human_score": null,
+        "latency_seconds": 0.49224962503649294,
+        "latency_status": "observed",
+        "missing_atom_ids": [
+          "exact_detail"
+        ],
+        "passed_acceptance_thresholds": true,
+        "provider_reported_input_tokens": null,
+        "provider_reported_output_tokens": null,
+        "provider_usage_status": "unavailable",
+        "prune_count": 0,
+        "rebuild_count": 3,
+        "recovery_count": 0,
+        "recovery_success": true,
+        "retrieval_success": 1.0,
+        "schema_version": 1,
+        "session_id": "ca2ca86ef1d842d9bddb5c00b035023d",
+        "stale_atom_ids": [],
+        "stale_fact_rate": 0.0,
+        "state_micro_f1": 1.0,
+        "state_precision": 1.0,
+        "state_recall": 1.0
+      },
+      "success": true,
+      "task_id": "fix_increment"
+    },
+    {
+      "duration_seconds": 0.5090139170642942,
+      "evaluation": {
+        "checkpoint_count": 3,
+        "cost_status": "unavailable",
+        "cost_usd": null,
+        "critical_constraint_exact_recall": 1.0,
+        "cycle_count": 4,
+        "end_task_success": true,
+        "estimated_request_tokens": 14864,
+        "event_count": 42,
+        "exact_detail_recall": 0.0,
+        "false_completion_rate": 0.0,
+        "fixture_id": "fix_slugify",
+        "history_recoverable_atom_ids": [
+          "constraint",
+          "exact_detail",
+          "retrieval_target",
+          "completion_evidence"
+        ],
+        "human_evaluation_status": "unavailable",
+        "human_score": null,
+        "latency_seconds": 0.5090139170642942,
+        "latency_status": "observed",
+        "missing_atom_ids": [
+          "exact_detail"
+        ],
+        "passed_acceptance_thresholds": true,
+        "provider_reported_input_tokens": null,
+        "provider_reported_output_tokens": null,
+        "provider_usage_status": "unavailable",
+        "prune_count": 0,
+        "rebuild_count": 3,
+        "recovery_count": 0,
+        "recovery_success": true,
+        "retrieval_success": 1.0,
+        "schema_version": 1,
+        "session_id": "290fd50e11614da5906214fb75520622",
+        "stale_atom_ids": [],
+        "stale_fact_rate": 0.0,
+        "state_micro_f1": 1.0,
+        "state_precision": 1.0,
+        "state_recall": 1.0
+      },
+      "success": true,
+      "task_id": "fix_slugify"
+    },
+    {
+      "duration_seconds": 0.48907345812767744,
+      "evaluation": {
+        "checkpoint_count": 3,
+        "cost_status": "unavailable",
+        "cost_usd": null,
+        "critical_constraint_exact_recall": 1.0,
+        "cycle_count": 4,
+        "end_task_success": true,
+        "estimated_request_tokens": 14500,
+        "event_count": 42,
+        "exact_detail_recall": 0.0,
+        "false_completion_rate": 0.0,
+        "fixture_id": "enable_feature_flag",
+        "history_recoverable_atom_ids": [
+          "constraint",
+          "exact_detail",
+          "retrieval_target",
+          "completion_evidence"
+        ],
+        "human_evaluation_status": "unavailable",
+        "human_score": null,
+        "latency_seconds": 0.48907345812767744,
+        "latency_status": "observed",
+        "missing_atom_ids": [
+          "exact_detail"
+        ],
+        "passed_acceptance_thresholds": true,
+        "provider_reported_input_tokens": null,
+        "provider_reported_output_tokens": null,
+        "provider_usage_status": "unavailable",
+        "prune_count": 0,
+        "rebuild_count": 3,
+        "recovery_count": 0,
+        "recovery_success": true,
+        "retrieval_success": 1.0,
+        "schema_version": 1,
+        "session_id": "8875b97126e44154a887f3bd40a8ff59",
+        "stale_atom_ids": [],
+        "stale_fact_rate": 0.0,
+        "state_micro_f1": 1.0,
+        "state_precision": 1.0,
+        "state_recall": 1.0
+      },
+      "success": true,
+      "task_id": "enable_feature_flag"
+    }
+  ]
+}

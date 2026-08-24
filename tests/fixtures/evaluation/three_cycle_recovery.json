@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "fixture_id": "three_cycle_recovery",
+  "description": "Three rebuild cycles preserve current state and keep omitted exact detail recoverable.",
+  "atoms": [
+    {
+      "atom_id": "must_keep_constraint",
+      "category": "critical_constraint",
+      "text": "Never remove the compatibility shim",
+      "source_event_ids": [3],
+      "is_current": true
+    },
+    {
+      "atom_id": "exact_regression_code",
+      "category": "exact_detail",
+      "text": "rare-regression-code-7319",
+      "source_event_ids": [4],
+      "is_current": true
+    },
+    {
+      "atom_id": "active_task",
+      "category": "active_state",
+      "text": "Verify the final change",
+      "source_event_ids": [5],
+      "is_current": true
+    },
+    {
+      "atom_id": "old_strategy",
+      "category": "superseded_decision",
+      "text": "Use the deleted legacy strategy",
+      "source_event_ids": [6],
+      "is_current": false
+    },
+    {
+      "atom_id": "history_target",
+      "category": "retrieval_target",
+      "text": "rare-regression-code-7319",
+      "source_event_ids": [4],
+      "is_current": true
+    },
+    {
+      "atom_id": "completion_record",
+      "category": "completion_evidence",
+      "text": "required-suite: passed",
+      "source_event_ids": [12],
+      "is_current": true
+    }
+  ]
+}

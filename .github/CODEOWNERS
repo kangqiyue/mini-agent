@@ -1,0 +1,14 @@
+# Security controls require explicit owner review when branch protection enables it.
+/.github/CODEOWNERS @kangqiyue
+/.github/dependabot.yml @kangqiyue
+/.github/workflows/ @kangqiyue
+/.gitignore @kangqiyue
+/.gitleaks.toml @kangqiyue
+/.gitleaksignore @kangqiyue
+/.pre-commit-config.yaml @kangqiyue
+/scripts/ @kangqiyue
+/pyproject.toml @kangqiyue
+/uv.lock @kangqiyue
+/docs/RELEASING.md @kangqiyue
+/SECURITY.md @kangqiyue
+/tests/release/ @kangqiyue

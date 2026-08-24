@@ -1,0 +1,109 @@
+[build-system]
+requires = ["hatchling==1.32.0", "editables==0.6"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mini-agent"
+version = "0.1.0rc1"
+description = "A small, observable local coding agent for long-horizon experiments"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+authors = [{ name = "kangqiyue" }]
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ["agent", "coding-agent", "llm", "local-first"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
+]
+dependencies = [
+  "httpx>=0.28,<1",
+  "platformdirs>=4.3,<5",
+  "pydantic>=2.11,<3",
+  "rich>=15,<16",
+  "typer>=0.16,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "editables==0.6",
+  "hatchling==1.32.0",
+  "pre-commit>=4,<5",
+  "pyright>=1.1.400",
+  "pytest>=8.4",
+  "pytest-asyncio>=1.1",
+  "ruff>=0.12",
+]
+
+[project.scripts]
+mini-agent = "mini_agent.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/kangqiyue/mini-agent"
+Repository = "https://github.com/kangqiyue/mini-agent.git"
+Issues = "https://github.com/kangqiyue/mini-agent/issues"
+Changelog = "https://github.com/kangqiyue/mini-agent/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mini_agent"]
+
+[tool.hatch.build.targets.wheel.force-include]
+".mini-agent/config.example.toml" = "mini_agent/config.example.toml"
+
+[tool.hatch.build.targets.sdist]
+ignore-vcs = true
+include = [
+  "/.gitleaks.toml",
+  "/.gitleaksignore",
+  "/.mini-agent/config.example.toml",
+  "/.pre-commit-config.yaml",
+  "/CHANGELOG.md",
+  "/CONTRIBUTING.md",
+  "/LICENSE",
+  "/README.md",
+  "/README.zh-CN.md",
+  "/SECURITY.md",
+  "/docs",
+  "/pyproject.toml",
+  "/scripts",
+  "/src",
+  "/tests",
+  "/uv.lock",
+]
+exclude = [
+  "/.mini-agent/config.toml",
+  "/AGENTS.md",
+  "/HANDOFF.md",
+]
+
+[tool.uv]
+required-version = "==0.11.28"
+
+[tool.pytest.ini_options]
+addopts = "-q --strict-config --strict-markers"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+  "local_integration: explicitly enabled test against a local LiteLLM-compatible provider",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "SIM", "UP"]
+
+[tool.pyright]
+include = ["scripts", "src", "tests"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+venvPath = "."
+venv = ".venv"

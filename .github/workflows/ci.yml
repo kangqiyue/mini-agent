@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.12", "3.13", "3.14"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.11.28"
+          enable-cache: true
+      - run: uv sync --extra dev --locked --no-install-project
+      - run: uv sync --extra dev --locked --no-build-isolation
+      - run: uv run --no-sync ruff check .
+      - run: uv run --no-sync pyright
+      - run: uv run --no-sync pytest
+      - run: uv build --no-build-isolation
+      - run: uv run --no-sync mini-agent --help
+      - run: python -m venv .wheel-smoke
+      - run: uv pip install --python .wheel-smoke/bin/python dist/*.whl
+      - run: mkdir .wheel-smoke-workspace
+      - run: .wheel-smoke/bin/mini-agent --help
+      - run: .wheel-smoke/bin/mini-agent init-config --workspace .wheel-smoke-workspace
+      - run: >-
+          .wheel-smoke/bin/python -c
+          "from pathlib import Path; from mini_agent.config import load_config;
+          config = load_config(Path('.wheel-smoke-workspace/.mini-agent/config.toml'));
+          assert config.model.model == 'your-model-name'"
+      - run: >-
+          .wheel-smoke/bin/mini-agent benchmark
+          --output .wheel-smoke-workspace/benchmark.json
+
+  release-gate:
+    if: always()
+    needs: [verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require verification
+        env:
+          VERIFY_RESULT: ${{ needs.verify.result }}
+        run: |
+          test "$VERIFY_RESULT" = "success"
