@@ -193,12 +193,22 @@ class MiniAgent:
             else 0
         )
         self._passed_milestones: set[float] = set()
+        # Serializes the agent-running entry points (run_turn, compact,
+        # checkpoint) that mutate shared projection/cycle state across awaits.
+        # Internal helpers (_run_model_loop, _rebuild, _checkpoint) do not take
+        # this lock, so a turn's own sub-operations do not self-deadlock; the
+        # CLI is single-driver so this never contends in practice.
+        self._turn_lock = asyncio.Lock()
 
     @property
     def request_budget(self) -> RequestBudget:
         return self._request_budget
 
     async def run_turn(self, user_input: str) -> ModelResponse:
+        async with self._turn_lock:
+            return await self._run_turn_once(user_input)
+
+    async def _run_turn_once(self, user_input: str) -> ModelResponse:
         self._require_resumed_session()
         goal = self.session.goal
         if goal is not None and goal.status is GoalStatus.BLOCKED:
@@ -343,6 +353,10 @@ class MiniAgent:
     async def compact(self, *, focus: str | None = None) -> ContextProjection:
         """Synchronously checkpoint and rebuild the next active request view."""
 
+        async with self._turn_lock:
+            return await self._compact_once(focus=focus)
+
+    async def _compact_once(self, *, focus: str | None = None) -> ContextProjection:
         self._require_resumed_session()
         if len(self.session.events) < 1:
             raise RuntimeError("Cannot compact an empty session")
@@ -365,6 +379,10 @@ class MiniAgent:
     async def checkpoint(self, *, focus: str | None = None) -> None:
         """Commit current durable state without switching the active cycle."""
 
+        async with self._turn_lock:
+            await self._checkpoint_once(focus=focus)
+
+    async def _checkpoint_once(self, *, focus: str | None = None) -> None:
         self._require_resumed_session()
         call_budget = _ProviderCallBudget(
             maximum_count=self._config.runtime.max_model_calls_per_turn

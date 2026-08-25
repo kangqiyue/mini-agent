@@ -57,6 +57,10 @@ _CREDENTIAL_BEARING_COMMANDS = frozenset(
         "sshpass",
     )
 )
+# Shells whose ``-c <string>`` form hides a command inside a single argv value,
+# so a credential-bearing command inside that string bypasses argv-level
+# option detection (e.g. ``sh -c "mysql -pSECRET"``).
+_SHELL_COMMANDS = frozenset(("sh", "bash", "dash", "zsh", "ksh", "ash"))
 _MAX_CREDENTIAL_COMMAND_CANDIDATES = 64
 
 
@@ -188,6 +192,54 @@ def _parse_bounded_arguments(arguments_json: str) -> _ParsedExecCommandArguments
     )
 
 
+def _shell_wrapper_sensitive_command_string_indices(
+    argv: list[str],
+    *,
+    invocation: _CommandInvocation,
+) -> set[int]:
+    """Redact a shell ``-c <string>`` that hides a credential-bearing command.
+
+    ``sh -c "mysql -pSECRET ..."`` places a command inside a single argv value,
+    so argv-level credential flag detection never runs on its options. The
+    string's whitespace-split tokens are re-checked with the same per-command
+    credential-flag detection used for a direct argv, so a credential-bearing
+    command is redacted only when its credential flag (or an env assignment) is
+    actually present -- a benign ``sh -c "curl -s http://localhost/health"`` is
+    left intact, matching the unwrapped ``curl -s …`` behavior.
+
+    The whole string is redacted because quoting makes per-value redaction
+    unreliable. ``-c`` clustered with other shell options (e.g. ``bash -ic …``)
+    is not detected; only the standalone ``-c`` form is.
+    """
+    if invocation.name not in _SHELL_COMMANDS:
+        return set()
+    command_string_index = _shell_command_string_index(argv, invocation)
+    if command_string_index is None:
+        return set()
+    command_string = argv[command_string_index]
+    sub_argv = command_string.split()
+    if not sub_argv:
+        return set()
+    sub_invocation = _command_invocation(sub_argv)
+    if sub_invocation is None:
+        # An opaque inner form (e.g. another env wrapper) hides command text.
+        return {command_string_index}
+    if _command_specific_sensitive_argv_indices(sub_argv, invocation=sub_invocation):
+        return {command_string_index}
+    return set()
+
+
+def _shell_command_string_index(
+    argv: list[str],
+    invocation: _CommandInvocation,
+) -> int | None:
+    """Return the command-string index for a shell ``-c`` form, or None."""
+    for index in range(invocation.option_start_index, len(argv)):
+        if argv[index] == "-c" and index + 1 < len(argv):
+            return index + 1
+    return None
+
+
 def _sensitive_argv_indices(argv: list[str]) -> set[int]:
     invocation = _command_invocation(argv)
     if invocation is None:
@@ -203,6 +255,9 @@ def _sensitive_argv_indices(argv: list[str]) -> set[int]:
     )
     sensitive_indices.update(
         _command_specific_sensitive_argv_indices(argv, invocation=invocation)
+    )
+    sensitive_indices.update(
+        _shell_wrapper_sensitive_command_string_indices(argv, invocation=invocation)
     )
     return sensitive_indices
 

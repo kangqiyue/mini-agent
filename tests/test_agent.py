@@ -307,6 +307,38 @@ async def test_run_turn_stops_before_provider_when_full_history_exceeds_budget(
     assert provider.requests == []
 
 
+@pytest.mark.asyncio
+async def test_run_turn_serializes_concurrent_calls(tmp_path: Path) -> None:
+    # Without a serialization guard, two overlapping run_turn calls would
+    # interleave at the provider await and clobber shared projection/cycle
+    # state. A provider that records how many complete() calls are in flight at
+    # once proves the MiniAgent lock serializes the agent-running entry points.
+
+    class _ConcurrencyDetectingProvider:
+        def __init__(self) -> None:
+            self._in_flight = 0
+            self.max_concurrency = 0
+
+        async def complete(self, request: ModelRequest) -> ModelResponse:
+            del request
+            self._in_flight += 1
+            self.max_concurrency = max(self.max_concurrency, self._in_flight)
+            try:
+                await asyncio.sleep(0.02)
+            finally:
+                self._in_flight -= 1
+            return ModelResponse(content="done", finish_reason=FinishReason.STOP)
+
+    session = AgentSession.create(data_dir=tmp_path / "data", workspace=tmp_path, model="m")
+    provider = _ConcurrencyDetectingProvider()
+    agent = MiniAgent(config=_config(tmp_path), provider=provider, session=session)
+
+    await asyncio.gather(agent.run_turn("first"), agent.run_turn("second"))
+
+    assert provider.max_concurrency == 1
+    session.close()
+
+
 def test_constructor_rejects_an_unsendable_base_request_before_checkpoint_side_effects(
     tmp_path: Path,
 ) -> None:

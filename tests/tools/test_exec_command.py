@@ -768,6 +768,66 @@ def test_exec_command_short_credential_options_are_redacted_and_rejected_preflig
 @pytest.mark.parametrize(
     "argv",
     (
+        ["sh", "-c", "mysql -h db -u u -p{credential}"],
+        ["sh", "-c", "redis-cli -a {credential}"],
+        ["bash", "-c", "sshpass -p {credential} ls"],
+        ["sh", "-c", "/usr/bin/mysql -p{credential}"],
+    ),
+)
+def test_exec_command_shell_wrapper_hiding_credential_command_is_redacted_and_rejected(
+    tmp_path: Path,
+    argv: list[str],
+) -> None:
+    """A credential-bearing command hidden in ``sh -c "..."`` must not bypass
+    argv-level detection: it is redacted from durable arguments and rejected at
+    preflight, matching the unwrapped command's behavior."""
+
+    tool = ExecCommandTool(Workspace(tmp_path))
+    credential = _opaque_credential_value()
+    raw = _arguments([value.replace("{credential}", credential) for value in argv])
+
+    safe = sanitize_exec_command_arguments(raw)
+
+    assert safe.has_sensitive_content is True
+    assert credential not in safe.arguments_json
+    with pytest.raises(ToolError) as error_info:
+        tool.preflight(raw)
+    assert error_info.value.code == "sensitive_command_arguments"
+    assert credential not in str(error_info.value)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    (
+        ["sh", "-c", "ls -la"],
+        ["sh", "-c", "echo hello world"],
+        ["bash", "-c", "git status"],
+        ["sh", "-c", "curl -s http://localhost:8080/health"],
+        ["sh", "-c", "docker run --rm alpine echo hi"],
+        ["sh", "-c", "redis-cli ping"],
+        ["sh", "-c", "echo mysql"],
+    ),
+)
+def test_exec_command_benign_shell_wrapper_is_left_intact(
+    tmp_path: Path, argv: list[str]
+) -> None:
+    """A shell command containing no credential-bearing command is neither
+    redacted nor rejected, preserving legitimate shell use."""
+
+    tool = ExecCommandTool(Workspace(tmp_path))
+    raw = _arguments(argv)
+
+    safe = sanitize_exec_command_arguments(raw)
+
+    assert safe.has_sensitive_content is False
+    for value in argv[2:]:
+        assert value in safe.arguments_json
+    tool.preflight(raw)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    (
         ["curl", "-uaccount:{credential}"],
         ["curl", "-suaccount:{credential}"],
         ["curl", "-su", "account:{credential}"],
