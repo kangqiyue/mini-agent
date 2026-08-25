@@ -986,12 +986,13 @@ async def _run_interactive(
                 stop_reason = "turn_failure"
                 continue
             except (asyncio.CancelledError, KeyboardInterrupt):
-                # Ctrl-C while the model is thinking is delivered inside the
-                # coroutine as asyncio.CancelledError (asyncio.run only re-raises
-                # KeyboardInterrupt at its own boundary afterward). Absorb it
-                # here and stop the session cleanly so the terminal event is
-                # recorded and the writer lock released, instead of aborting past
-                # session.finalize() and leaving the session unresumable.
+                # Ctrl-C during a model turn is delivered inside the coroutine as
+                # asyncio.CancelledError. Absorb it here and stop the session
+                # cleanly so the terminal event is recorded and the writer lock
+                # released, instead of aborting past session.finalize() and leaving
+                # the session unresumable. A second Ctrl-C (or a direct signal) can
+                # still surface as KeyboardInterrupt at asyncio.run's boundary, which
+                # _run_interactive_safely catches below.
                 typer.echo("Interrupted; stopping the session.", err=True)
                 stop_reason = "user_interrupt"
                 break

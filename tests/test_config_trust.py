@@ -61,7 +61,7 @@ def test_load_runtime_config_refuses_untrusted_workspace_config_non_interactivel
         patch("mini_agent.cli._is_interactive_terminal", return_value=False),
         pytest.raises(typer.BadParameter),
     ):
-        cli_module._load_runtime_config(workspace, None)
+        cli_module._load_runtime_config(workspace, None)  # pyright: ignore[reportPrivateUsage]
     assert not is_workspace_trusted(workspace)
 
 
@@ -71,7 +71,7 @@ def test_load_runtime_config_trust_flag_loads_and_records_trust(
     workspace = tmp_path / "ws"
     workspace.mkdir()
     _write_workspace_config(workspace, data_dir=tmp_path / "data")
-    config = cli_module._load_runtime_config(
+    config = cli_module._load_runtime_config(  # pyright: ignore[reportPrivateUsage]
         workspace, None, trust_workspace_config=True
     )
     assert isinstance(config, MiniAgentConfig)
@@ -85,7 +85,7 @@ def test_load_runtime_config_loads_after_prior_trust(
     workspace.mkdir()
     _write_workspace_config(workspace, data_dir=tmp_path / "data")
     trust_workspace(workspace)
-    config = cli_module._load_runtime_config(workspace, None)
+    config = cli_module._load_runtime_config(workspace, None)  # pyright: ignore[reportPrivateUsage]
     assert isinstance(config, MiniAgentConfig)
 
 
@@ -109,7 +109,7 @@ def test_load_runtime_config_explicit_config_skips_gate(
         ),
         encoding="utf-8",
     )
-    config = cli_module._load_runtime_config(workspace, explicit)
+    config = cli_module._load_runtime_config(workspace, explicit)  # pyright: ignore[reportPrivateUsage]
     assert isinstance(config, MiniAgentConfig)
     assert not is_workspace_trusted(workspace)
 
@@ -124,7 +124,7 @@ def test_load_runtime_config_interactive_prompt_yes_trusts(
         patch("mini_agent.cli._is_interactive_terminal", return_value=True),
         patch("mini_agent.cli.typer.confirm", return_value=True),
     ):
-        config = cli_module._load_runtime_config(workspace, None)
+        config = cli_module._load_runtime_config(workspace, None)  # pyright: ignore[reportPrivateUsage]
     assert isinstance(config, MiniAgentConfig)
     assert is_workspace_trusted(workspace)
 
@@ -140,7 +140,7 @@ def test_load_runtime_config_interactive_prompt_no_refuses(
         patch("mini_agent.cli.typer.confirm", return_value=False),
         pytest.raises(typer.BadParameter),
     ):
-        cli_module._load_runtime_config(workspace, None)
+        cli_module._load_runtime_config(workspace, None)  # pyright: ignore[reportPrivateUsage]
     assert not is_workspace_trusted(workspace)
 
 
@@ -152,7 +152,7 @@ def test_load_runtime_config_skips_gate_for_read_only_commands(
     workspace = tmp_path / "ws"
     workspace.mkdir()
     _write_workspace_config(workspace, data_dir=tmp_path / "data")
-    config = cli_module._load_runtime_config(
+    config = cli_module._load_runtime_config(  # pyright: ignore[reportPrivateUsage]
         workspace, None, enforce_workspace_trust=False
     )
     assert isinstance(config, MiniAgentConfig)
@@ -172,5 +172,5 @@ def test_load_runtime_config_gates_explicit_config_pointing_at_workspace_config(
         patch("mini_agent.cli._is_interactive_terminal", return_value=False),
         pytest.raises(typer.BadParameter),
     ):
-        cli_module._load_runtime_config(workspace, workspace_cfg)
+        cli_module._load_runtime_config(workspace, workspace_cfg)  # pyright: ignore[reportPrivateUsage]
     assert not is_workspace_trusted(workspace)
