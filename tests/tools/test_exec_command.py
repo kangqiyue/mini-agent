@@ -1,8 +1,11 @@
 import json
+import os
+import select
 import signal
 import subprocess
 import sys
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -442,33 +445,40 @@ def test_exec_command_interrupt_kills_process_group(
 
 
 def test_exec_command_detached_pipe_holder_does_not_extend_deadline(tmp_path: Path) -> None:
-    marker = tmp_path / "detached-pipe-holder-survived"
-    descendant_code = (
-        "import os, pathlib, time; "
-        "os.setsid(); "
-        "print('detached', flush=True); "
-        "time.sleep(0.5); "
-        f"pathlib.Path({str(marker)!r}).write_text('alive')"
+    code = (
+        "import os, time\n"
+        "if os.fork() == 0:\n"
+        "    os.setsid()\n"
+        "    os.write(1, (str(os.getpid()) + '\\n').encode())\n"
+        "    time.sleep(30)\n"
     )
-    command = [
-        sys.executable,
-        "-c",
-        "import subprocess, sys, time; "
-        f"subprocess.Popen([sys.executable, '-c', {descendant_code!r}]); "
-        "time.sleep(0.05)",
-    ]
+    command = [sys.executable, "-c", code]
     tool = ExecCommandTool(Workspace(tmp_path))
-
-    started_at = time.monotonic()
-    with pytest.raises(ToolError, match="time limit") as error_info:
-        tool.execute(_arguments(command, timeout_seconds=0.2))
-    elapsed_seconds = time.monotonic() - started_at
-
-    assert error_info.value.code == "command_timeout"
-    assert elapsed_seconds < 0.45
-    time.sleep(0.55)
-    # A descendant can call setsid() and leave the command's process group.
-    assert marker.exists()
+    # Establish the detached pipe holder before measuring the short deadline,
+    # instead of assuming two Python processes can start within 200 ms.
+    with subprocess.Popen(
+        command, cwd=tmp_path, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True,
+    ) as process:
+        assert process.stdout is not None
+        assert select.select([process.stdout], [], [], 10)[0], "Child did not become ready"
+        detached_pid = int(process.stdout.readline())
+        try:
+            process.wait(timeout=10)
+            with patch.object(
+                workspace_subprocess.WorkspaceSubprocessLauncher, "start", return_value=process
+            ):
+                started_at = time.monotonic()
+                with pytest.raises(ToolError, match="time limit") as error_info:
+                    tool.execute(_arguments(command, timeout_seconds=0.2))
+                elapsed_seconds = time.monotonic() - started_at
+            assert error_info.value.code == "command_timeout"
+            assert elapsed_seconds < 2
+            # setsid() leaves the tool's process group; the holder is still alive.
+            os.kill(detached_pid, 0)
+        finally:
+            with suppress(ProcessLookupError):
+                os.kill(detached_pid, signal.SIGKILL)
 
 
 def test_exec_command_returns_exit_code_stdout_stderr_and_duration(tmp_path: Path) -> None:

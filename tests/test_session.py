@@ -2,13 +2,14 @@ import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
 
 from mini_agent.artifacts import ArtifactStore
 from mini_agent.checkpoint import Checkpoint, CheckpointStore, CheckpointStoreCorruptionError
-from mini_agent.event_store import EventStoreCorruptionError
+from mini_agent.event_store import EventStore, EventStoreCorruptionError
 from mini_agent.events import (
     ApprovalDecision,
     ArtifactCreatedData,
@@ -19,6 +20,7 @@ from mini_agent.events import (
     ToolCompletedData,
     ToolInterruptedData,
     ToolRecoveryStatus,
+    UserMessageData,
 )
 from mini_agent.messages import FinishReason, MessageRole, ToolCall
 from mini_agent.permissions import recompute_approval_scope
@@ -33,6 +35,86 @@ from mini_agent.tool_facts import ToolCompletionFacts
 from tests.support.synthetic_secrets import synthetic_stripe_access_token
 
 _SYNTHETIC_METADATA_SECRET = synthetic_stripe_access_token("METADATA")
+
+
+def test_event_observer_receives_only_already_durable_redacted_events(tmp_path: Path) -> None:
+    session = AgentSession.create(data_dir=tmp_path / "data", workspace=tmp_path, model="m")
+    observed: list[StoredEvent] = []
+    secret = synthetic_stripe_access_token("OBSERVER")
+
+    def observe(event: StoredEvent) -> None:
+        persisted = EventStore.open(session.paths.events, writable=False, allow_recovery=False)
+        try:
+            assert persisted.events[-1] == event
+        finally:
+            persisted.close()
+        observed.append(event)
+
+    try:
+        with session.observe_events(observe):
+            event = session.append_user_message(secret, turn_id=session.new_turn_id())
+        assert observed == [event]
+        assert isinstance(event.data, UserMessageData)
+        assert secret not in event.data.content
+        assert "REDACTED" in event.data.content
+        session.append_user_message("after observer", turn_id=session.new_turn_id())
+        assert observed == [event]
+    finally:
+        session.close()
+
+
+def test_failed_persistence_does_not_notify_event_observer(tmp_path: Path) -> None:
+    session = AgentSession.create(data_dir=tmp_path / "data", workspace=tmp_path, model="m")
+    observed: list[StoredEvent] = []
+    try:
+        with (
+            session.observe_events(observed.append),
+            patch.object(session.store, "append", side_effect=OSError("write failed")),
+            pytest.raises(OSError, match="write failed"),
+        ):
+            session.append_user_message("question", turn_id=session.new_turn_id())
+        assert observed == []
+    finally:
+        session.close()
+
+
+def test_observer_failure_leaves_tool_completion_durable_and_clears_subscription(
+    tmp_path: Path,
+) -> None:
+    session = AgentSession.create(data_dir=tmp_path / "data", workspace=tmp_path, model="m")
+    turn_id, call, _ = _start_read_tool(session)
+
+    def fail_display(_event: StoredEvent) -> None:
+        raise OSError("display unavailable")
+
+    with session.observe_events(fail_display), pytest.raises(OSError, match="display unavailable"):
+        session.append_tool_completed(call, "saved result", turn_id=turn_id)
+    # The operation is completed even though the renderer failed; resume must not replay it.
+    session.stop("turn_failure")
+    session.close()
+    resumed = AgentSession.resume(
+        data_dir=tmp_path / "data", session_id=session.metadata.session_id
+    )
+    try:
+        completions = [e.data for e in resumed.events if isinstance(e.data, ToolCompletedData)]
+        assert len(completions) == 1
+        assert completions[0].output == "saved result"
+        assert not any(isinstance(e.data, ToolInterruptedData) for e in resumed.events)
+    finally:
+        resumed.close()
+
+
+def test_nested_observer_is_rejected_without_replacing_original_observer(tmp_path: Path) -> None:
+    session = AgentSession.create(data_dir=tmp_path / "data", workspace=tmp_path, model="m")
+    observed: list[StoredEvent] = []
+    try:
+        with session.observe_events(observed.append):
+            with pytest.raises(RuntimeError, match="already active"), session.observe_events(print):
+                pytest.fail("Nested observer must not start")
+            event = session.append_user_message("question", turn_id=session.new_turn_id())
+        assert observed == [event]
+    finally:
+        session.close()
 
 
 def _start_read_tool(session: AgentSession) -> tuple[str, ToolCall, StoredEvent]:

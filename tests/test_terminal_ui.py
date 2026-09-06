@@ -3,14 +3,17 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from rich.console import Console
+from rich.text import Text
 
 from mini_agent.agent import AgentStatus
 from mini_agent.context import ContextProjection, RequestTokenEstimate
 from mini_agent.goal import GoalStatus
-from mini_agent.messages import ConversationMessage, MessageRole
+from mini_agent.messages import ConversationMessage, MessageRole, ToolCall
 from mini_agent.session import SessionSummary
 from mini_agent.system_prompt import GitContext, RuntimeContext
+from mini_agent.terminal_tools import OutputMode
 from mini_agent.terminal_ui import TerminalChatUI
 
 
@@ -56,7 +59,7 @@ def test_terminal_ui_does_not_emit_hyperlink_escape_sequences_from_assistant_tex
     assert "https://untrusted.example/path" in rendered
 
 
-def test_terminal_ui_reads_input_inside_a_user_frame() -> None:
+def test_terminal_ui_reads_input_without_a_fixed_width_frame() -> None:
     output = StringIO()
     ui = TerminalChatUI(Console(file=output, force_terminal=False, width=60))
 
@@ -65,9 +68,9 @@ def test_terminal_ui_reads_input_inside_a_user_frame() -> None:
 
     rendered = output.getvalue()
     assert value == "inspect the repository"
-    assert "╭─ You" in rendered
-    assert "│ ❯ " in rendered
-    assert "╰" in rendered
+    assert "You\n❯ " in rendered
+    assert "╭" not in rendered
+    assert "╰" not in rendered
 
 
 def test_terminal_ui_renders_compact_status_before_input() -> None:
@@ -208,3 +211,85 @@ def test_terminal_ui_does_not_render_empty_resume_history() -> None:
     ui.show_recent_conversation(())
 
     assert output.getvalue() == ""
+
+
+@pytest.mark.parametrize("width", [20, 40, 80, 120])
+def test_status_reserves_last_column_and_keeps_semantic_blocks_together(width: int) -> None:
+    output = StringIO()
+    ui = TerminalChatUI(Console(file=output, force_terminal=False, width=width))
+    runtime = RuntimeContext(
+        model="provider/中文-model-" * 6,
+        workspace=Path("/workspace"),
+        platform="TestOS",
+        git=GitContext(is_repository=True, branch="main"),
+    )
+
+    ui.show_status(
+        AgentStatus(
+            runtime=runtime,
+            context=None,
+            checkpoint_version=None,
+            goal_status=GoalStatus.ACTIVE,
+            has_uncommitted_events=False,
+        )
+    )
+
+    rendered = output.getvalue()
+    assert "goal active" in rendered
+    assert "checkpoint none" in rendered
+    assert "output brief" in rendered
+    assert all(Text(line).cell_len < width for line in rendered.splitlines())
+
+
+def test_detailed_history_includes_arguments_for_tool_only_assistant_messages() -> None:
+    output = StringIO()
+    ui = TerminalChatUI(Console(file=output, width=120), output_mode=OutputMode.DETAILED)
+    call = ToolCall(id="call", name="read_file", arguments_json='{"path":"notes.txt"}')
+    messages = (
+        ConversationMessage(role=MessageRole.USER, content="read the file"),
+        ConversationMessage(role=MessageRole.ASSISTANT, tool_calls=(call,)),
+        ConversationMessage(role=MessageRole.TOOL, tool_call_id="call", content="saved body"),
+    )
+
+    ui.show_recent_conversation(messages)
+
+    assert "notes.txt" in output.getvalue()
+    assert "read_file · saved result" in output.getvalue()
+    assert "saved body" in output.getvalue()
+
+
+@pytest.mark.parametrize("command", ["/output invalid", "/output brief extra"])
+def test_invalid_output_mode_keeps_the_current_mode(command: str) -> None:
+    output = StringIO()
+    ui = TerminalChatUI(Console(file=output), output_mode=OutputMode.DETAILED)
+
+    ui.handle_output_command(command)
+
+    assert ui.output_mode is OutputMode.DETAILED
+    assert "Usage: /output brief|detailed" in output.getvalue()
+
+
+def test_output_mode_can_be_changed_without_restarting_the_ui() -> None:
+    output = StringIO()
+    ui = TerminalChatUI(Console(file=output))
+
+    ui.handle_output_command("/output detailed")
+
+    assert ui.output_mode is OutputMode.DETAILED
+    assert "/history" in output.getvalue()
+
+
+def test_approval_pause_stops_live_animation_until_input_finishes() -> None:
+    output = StringIO()
+    console = Console(file=output, force_terminal=True)
+    ui = TerminalChatUI(console)
+    status = console.status("working")
+    # Rich exposes its live lifecycle state on the underlying renderable.
+    live = status._live  # pyright: ignore[reportPrivateUsage]
+
+    with patch.object(console, "status", return_value=status), ui.thinking():
+        assert live.is_started
+        with ui.pause_thinking():
+            assert not live.is_started
+        assert live.is_started
+    assert not live.is_started

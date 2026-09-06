@@ -45,6 +45,7 @@ from mini_agent.permissions import ApprovalRequest
 from mini_agent.provider import ProviderCapabilities
 from mini_agent.session import AgentSession, list_sessions
 from mini_agent.system_prompt import GitContext, RuntimeContext
+from mini_agent.terminal_tools import OutputMode
 from mini_agent.workspace import WorkspacePathError
 from tests.support.synthetic_secrets import synthetic_stripe_access_token
 
@@ -69,7 +70,7 @@ def test_no_subcommand_starts_chat_with_current_workspace_defaults() -> None:
         result = runner.invoke(app, [])
 
     assert result.exit_code == 0, result.output
-    chat_mock.assert_called_once_with()
+    chat_mock.assert_called_once_with(auto_approve=False)
 
 
 def test_explicit_subcommand_does_not_start_default_chat() -> None:
@@ -193,8 +194,14 @@ def test_chat_first_input_floor_includes_user_and_rebuild_before_session_creatio
         ),
         acceptance_criteria=(),
     )
+    # This one-token boundary needs the same runtime snapshot on both sides.
+    # Live Git probes can change size when a subprocess probe times out.
+    runtime = RuntimeContext(
+        model="test-model", workspace=tmp_path, platform="TestOS",
+        git=GitContext(is_repository=False),
+    )
     system = normalize_conversation_message_host_paths(
-        setup.prompt_assembler.assemble(goal, runtime=setup.prompt_assembler.runtime_context()),
+        setup.prompt_assembler.assemble(goal, runtime=runtime),
         workspace_root=tmp_path,
     )
     full_request = normalize_model_request_host_paths(
@@ -233,7 +240,11 @@ def test_chat_first_input_floor_includes_user_and_rebuild_before_session_creatio
         encoding="utf-8",
     )
 
-    with patch("builtins.input", return_value=initial_input):
+    with (
+        patch("builtins.input", return_value=initial_input),
+        patch("mini_agent.cli.SystemPromptAssembler.runtime_context", return_value=runtime),
+        patch("mini_agent.cli.MiniAgent.run_turn", new_callable=AsyncMock) as turn,
+    ):
         result = runner.invoke(
             app,
             ["chat", "--workspace", str(tmp_path), "--config", str(config_path)],
@@ -242,6 +253,7 @@ def test_chat_first_input_floor_includes_user_and_rebuild_before_session_creatio
     assert result.exit_code == 1, result.output
     assert "Configuration cannot fit the required model request." in result.output
     assert not data_dir.exists()
+    turn.assert_not_awaited()
 
 
 def test_goal_mutation_preflight_preserves_existing_goal_after_rejection(
@@ -435,12 +447,12 @@ def test_chat_creates_session_for_first_request_and_processes_that_request(
     interactive = AsyncMock(return_value=InteractiveResult(stop_reason="user_exit"))
 
     with (
-        patch("builtins.input", return_value="inspect this project"),
+        patch("builtins.input", side_effect=["/output detailed", "inspect this project"]),
         patch("mini_agent.cli._run_interactive", interactive),
     ):
         result = runner.invoke(
             app,
-            ["chat", "--workspace", str(tmp_path), "--config", str(config_path)],
+            ["chat", "--workspace", str(tmp_path), "--config", str(config_path), "--auto-approve"],
         )
 
     assert result.exit_code == 0, result.output
@@ -449,6 +461,8 @@ def test_chat_creates_session_for_first_request_and_processes_that_request(
     assert await_args is not None
     assert await_args.kwargs["initial_input"] == "inspect this project"
     assert await_args.kwargs["show_welcome"] is False
+    assert await_args.kwargs["output_mode"] is OutputMode.DETAILED
+    assert await_args.kwargs["auto_approve"] is True
 
 
 def test_approval_prompt_denies_on_end_of_input() -> None:
@@ -465,6 +479,46 @@ def test_approval_prompt_denies_on_end_of_input() -> None:
         decision = TerminalApprovalPrompt().decide(request)
 
     assert decision is ApprovalDecision.DENY
+
+
+@pytest.mark.parametrize("answer", ["", " ", "yes", "s", "invalid"])
+def test_approval_prompt_denies_missing_or_unsupported_command_approval(answer: str) -> None:
+    request = ApprovalRequest(
+        tool_call_id="call",
+        tool_name="exec_command",
+        redacted_arguments='{"argv":["git","status"],"cwd":"."}',
+        scope_descriptor="exec_command:arguments:v1:" + "a" * 64,
+        scope_fingerprint="a" * 64,
+        can_allow_session=False,
+    )
+
+    with patch("builtins.input", return_value=answer) as prompt:
+        assert TerminalApprovalPrompt().decide(request) is ApprovalDecision.DENY
+
+    assert "o = allow once / d = deny (default d)" in prompt.call_args.args[0]
+    assert "[o]" not in prompt.call_args.args[0]
+
+
+def test_command_approval_explains_executable_directory_and_scope(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    request = ApprovalRequest(
+        tool_call_id="call",
+        tool_name="exec_command",
+        redacted_arguments='{"argv":["git","status"],"cwd":"."}',
+        scope_descriptor="exec_command:arguments:v1:" + "a" * 64,
+        scope_fingerprint="a" * 64,
+        can_allow_session=False,
+    )
+
+    with patch("builtins.input", return_value="o"):
+        assert TerminalApprovalPrompt().decide(request) is ApprovalDecision.ALLOW_ONCE
+
+    rendered = capsys.readouterr().out
+    assert "Command: git status" in rendered
+    assert "Directory: ." in rendered
+    assert "hooks or configured filters" in rendered
+    assert "this invocation only" in rendered
 
 
 def test_approval_prompt_disallows_session_choice_for_high_risk_tool() -> None:
@@ -499,7 +553,7 @@ def test_approval_prompt_describes_apply_patch_path_scope(
         decision = TerminalApprovalPrompt().decide(request)
 
     assert decision is ApprovalDecision.ALLOW_SESSION
-    assert "exact [s]ame file path this session" in input_mock.call_args.args[0]
+    assert "s = exact same file path this session" in input_mock.call_args.args[0]
     assert "Approval required: apply_patch" in capsys.readouterr().out
 
 
@@ -1071,9 +1125,8 @@ def test_resume_with_an_exact_id_rejects_a_different_workspace_before_writing(
         )
 
         assert rejected.exit_code != 0
-        assert (
-            "Requested session belongs to a different workspace."
-            in " ".join(rejected.output.replace("│", "").split())
+        assert "Requested session belongs to a different workspace." in " ".join(
+            rejected.output.replace("│", "").split()
         )
         assert session_id not in rejected.output
         assert str(first_workspace) not in rejected.output
@@ -1269,18 +1322,25 @@ def test_session_chain_closes_current_writer_before_resuming_target(tmp_path: Pa
             InteractiveResult(
                 stop_reason="resume_requested",
                 resume_session_id=second_id,
+                output_mode=OutputMode.DETAILED,
             ),
             InteractiveResult(stop_reason="user_exit"),
         )
     )
+
+    modes: list[OutputMode] = []
 
     def interactive(
         _config: MiniAgentConfig,
         session: AgentSession,
         *,
         registrations: tuple[object, ...],
+        output_mode: OutputMode,
+        auto_approve: bool,
     ) -> InteractiveResult:
         del _config, registrations
+        assert auto_approve
+        modes.append(output_mode)
         result = next(results)
         session.close()
         return result
@@ -1290,9 +1350,11 @@ def test_session_chain_closes_current_writer_before_resuming_target(tmp_path: Pa
             config,
             first,
             registrations=(),
+            auto_approve=True,
         )
 
     assert stop_reason == "user_exit"
+    assert modes == [OutputMode.BRIEF, OutputMode.DETAILED]
 
 
 def test_interactive_safe_runner_releases_writer_after_normal_exit(tmp_path: Path) -> None:

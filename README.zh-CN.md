@@ -128,6 +128,10 @@ mini-agent benchmark --output benchmark.json
 
 | 命令 | 作用 |
 |---|---|
+| `/output brief` | 默认简略模式：显示工具名、简短参数、完成状态和错误。 |
+| `/output detailed` | 详细模式：同时显示有长度限制的工具参数和结果。 |
+| `/history` | 按当前显示模式回放最近对话与工具结果；先切到 detailed 可以查看已保存输出。 |
+| `/permissions` | 查看审批规则与当前会话的文件授权数量。 |
 | `/system` | 查看下一次模型请求实际使用的完整 System Prompt；已知工作区/用户目录前缀会被归一化，自动采集的分支名只保留分类。 |
 | `/context` | 查看当前上下文投影的策略版本、估算 Token、利用率、消息数、Checkpoint 和事件水位。 |
 | `/checkpoint` | 把当前增量工作状态整理成一个持久化 Checkpoint。 |
@@ -142,6 +146,27 @@ mini-agent benchmark --output benchmark.json
 | `/resume` | 显示当前工作区和模型下的历史会话；选择后关闭当前会话，并从目标 Transcript 重建运行时状态。直接回车选择最近会话。 |
 | `/resume SESSION_ID` | 安全切换到同一工作区、同一模型的指定会话。 |
 | `/exit` | 结束交互并持久化会话停止状态。 |
+
+显示模式在本进程内切换 `/resume` 时保留，不改变模型上下文或 Transcript。
+较长的结果会显示 Artifact 引用。审批会先解释具体命令或文件、适用时的工作目录及授权范围，
+并暂停工作动画：`o` 单次允许，`d` 拒绝；只有明确提供时，`s` 才能授权本会话内的同一文件。
+空输入或无效选项都拒绝。默认对外部命令逐次审批，包括可能调用配置钩子或过滤器的 Git 命令。
+
+需要跳过工具审批时，显式选择自动批准：
+
+```bash
+mini-agent --auto-approve
+mini-agent chat --auto-approve
+mini-agent resume --auto-approve
+```
+
+状态栏会显示 `approvals AUTO`，命令和文件写入直接执行。该选择仅在本进程内生效，
+包括 `/resume` 切换；退出后重新启动，需要再次添加参数。工作区路径检查、凭据脱敏、
+审批记录和恢复规则继续生效，配置来源的信任检查也保持独立。
+适合可信的隔离工作区；获批命令仍使用当前操作系统用户的权限。
+
+已有 macOS Colima/LiteLLM 网关时，可使用
+[手动启动脚本](scripts/local_gateway_startup/README.md)启动现有服务并等待健康检查。
 
 当前没有单独的 `/model` 命令。模型名称会显示在启动面板中；对话过程中执行 `/system`，在 `Runtime context` 的 `Model` 字段也可以查看。最常用的几个命令是：
 
@@ -234,10 +259,12 @@ api_key_env = "LITELLM_API_KEY"
 
 `SystemPromptAssembler` 会为每次模型请求生成一条权威的首条 System Message。为了提高 Provider 前缀缓存的命中机会，内容按“稳定前缀 + 动态后缀”排列。主模型和 checkpoint 模型请求离开进程前，会把已知 workspace/home 前缀归一化为 `<workspace-root>`/`<home>`；该边界覆盖 System Prompt、对话/工具视图、history、checkpoint 输入和自定义工具 schema。自动采集的 Git 分支信息在写入 System Prompt 前只保留分类；这不是分支名 DLP，对话、项目内容或已审批工具输出里的分支文本仍可能发给 Provider。当前 OpenAI-compatible 适配器依赖 Provider 的自动前缀缓存，尚未发送专有的 `cache_control`，也尚未采集 `cached_tokens`。
 
-工作区专属指令通过 `system_prompt.instructions_file` 配置；该文件必须位于工作区内，并受严格的读取长度限制。完整的有界文件内容会在使用前分类：PEM 私钥会被拒绝，公开证书仍允许使用。该文件内容、对话、选中的文件内容和工具结果会按任务需要发送给已配置 Provider，因此未经批准不要在其中放入公司或组织敏感信息。路径归一化不是通用 DLP：其它绝对路径、组织名称、域名和项目内容仍可能被发送。终端继续使用 Rich，而不是全屏 TUI；每次输入框前会刷新一行轻量状态，显示当前模型、Git、估算上下文占用、Checkpoint 版本和 Goal 状态，例如：
+工作区专属指令通过 `system_prompt.instructions_file` 配置；该文件必须位于工作区内，并受严格的读取长度限制。完整的有界文件内容会在使用前分类：PEM 私钥会被拒绝，公开证书仍允许使用。该文件内容、对话、选中的文件内容和工具结果会按任务需要发送给已配置 Provider，因此未经批准不要在其中放入公司或组织敏感信息。路径归一化不是通用 DLP：其它绝对路径、组织名称、域名和项目内容仍可能被发送。终端继续使用 Rich；每次输入前将模型单独显示一行，其余状态块按终端宽度换行，显示 Git、估算上下文占用、Checkpoint 版本、Goal 状态和输出模式，例如：
 
 ```text
-provider/model-name │ git main │ ctx ~31.2k/83.6k 37% │ checkpoint v2+ │ goal active
+provider/model-name
+git main │ ctx ~31.2k/83.6k 37% │ checkpoint v2+ │ goal active
+output brief │ approvals ask
 ```
 
 自动 Git telemetry 不读取工作区 clean/dirty 状态，因此该状态行不会用 `*` 表示未提交

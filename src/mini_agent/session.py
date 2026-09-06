@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import re
 import stat
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -140,6 +142,23 @@ class AgentSession:
         self.metadata = metadata
         self.paths = paths
         self.store = store
+        self._event_observer: Callable[[StoredEvent], None] | None = None
+
+    @contextmanager
+    def observe_events(self, observer: Callable[[StoredEvent], None]) -> Generator[None]:
+        """Observe redacted durable appends during one foreground operation.
+
+        Observer failures propagate after persistence; callers must stop the
+        operation and resume rather than treat a display failure as lost history.
+        """
+
+        if self._event_observer is not None:
+            raise RuntimeError("A session event observer is already active")
+        self._event_observer = observer
+        try:
+            yield
+        finally:
+            self._event_observer = None
 
     @classmethod
     def create(cls, *, data_dir: Path, workspace: Path, model: str) -> AgentSession:
@@ -348,13 +367,16 @@ class AgentSession:
     ) -> StoredEvent:
         """Append through the current logical cycle unless explicitly overridden."""
 
-        return self.store.append(
+        event = self.store.append(
             session_id=self.metadata.session_id,
             cycle_id=cycle_id or self.current_cycle_id,
             turn_id=turn_id,
             correlation_id=correlation_id,
             data=data,
         )
+        if self._event_observer is not None:
+            self._event_observer(event)
+        return event
 
     def append_user_message(self, content: str, *, turn_id: str) -> StoredEvent:
         return self._append(
@@ -604,8 +626,7 @@ class AgentSession:
         cycle_id: int,
         turn_id: str,
     ) -> StoredEvent:
-        return self.store.append(
-            session_id=self.metadata.session_id,
+        return self._append(
             cycle_id=cycle_id,
             turn_id=turn_id,
             data=ContextEstimatedData(
@@ -628,8 +649,7 @@ class AgentSession:
         cycle_id: int,
         turn_id: str,
     ) -> StoredEvent:
-        return self.store.append(
-            session_id=self.metadata.session_id,
+        return self._append(
             cycle_id=cycle_id,
             turn_id=turn_id,
             data=ContextPrunedData(
@@ -651,8 +671,7 @@ class AgentSession:
         source_message_count: int,
         turn_id: str,
     ) -> StoredEvent:
-        return self.store.append(
-            session_id=self.metadata.session_id,
+        return self._append(
             cycle_id=source_cycle_id,
             turn_id=turn_id,
             data=RebuildStartedData(
@@ -679,8 +698,7 @@ class AgentSession:
         cycle_id: int,
         turn_id: str,
     ) -> StoredEvent:
-        return self.store.append(
-            session_id=self.metadata.session_id,
+        return self._append(
             cycle_id=cycle_id,
             turn_id=turn_id,
             data=RebuildCompletedData(
@@ -704,8 +722,7 @@ class AgentSession:
         cycle_id: int,
         turn_id: str,
     ) -> StoredEvent:
-        return self.store.append(
-            session_id=self.metadata.session_id,
+        return self._append(
             cycle_id=cycle_id,
             turn_id=turn_id,
             data=RebuildFailedData(
@@ -716,8 +733,7 @@ class AgentSession:
         )
 
     def stop(self, reason: str = "user_exit") -> StoredEvent:
-        return self.store.append(
-            session_id=self.metadata.session_id,
+        return self._append(
             data=SessionStoppedData(reason=reason),
         )
 
@@ -728,16 +744,14 @@ class AgentSession:
         is_read_only: bool,
         turn_id: str,
     ) -> StoredEvent:
-        return self.store.append(
-            session_id=self.metadata.session_id,
+        return self._append(
             turn_id=turn_id,
             correlation_id=tool_call.id,
             data=ToolRequestedData(tool_call=tool_call, is_read_only=is_read_only),
         )
 
     def append_tool_started(self, tool_call: ToolCall, *, turn_id: str) -> StoredEvent:
-        return self.store.append(
-            session_id=self.metadata.session_id,
+        return self._append(
             turn_id=turn_id,
             correlation_id=tool_call.id,
             data=ToolStartedData(tool_call_id=tool_call.id, tool_name=tool_call.name),
@@ -753,8 +767,7 @@ class AgentSession:
         facts: ToolCompletionFacts | None = None,
         turn_id: str,
     ) -> StoredEvent:
-        return self.store.append(
-            session_id=self.metadata.session_id,
+        return self._append(
             turn_id=turn_id,
             correlation_id=tool_call.id,
             data=ToolCompletedData(
@@ -767,8 +780,7 @@ class AgentSession:
         )
 
     def append_artifact_created(self, record: ArtifactRecord, *, turn_id: str) -> StoredEvent:
-        return self.store.append(
-            session_id=self.metadata.session_id,
+        return self._append(
             turn_id=turn_id,
             data=ArtifactCreatedData(
                 artifact_id=record.artifact_id,
@@ -790,8 +802,7 @@ class AgentSession:
         before_start: bool = False,
         turn_id: str,
     ) -> StoredEvent:
-        return self.store.append(
-            session_id=self.metadata.session_id,
+        return self._append(
             turn_id=turn_id,
             correlation_id=tool_call.id,
             data=ToolFailedData(
@@ -810,8 +821,7 @@ class AgentSession:
         reason: str,
         turn_id: str,
     ) -> StoredEvent:
-        return self.store.append(
-            session_id=self.metadata.session_id,
+        return self._append(
             turn_id=turn_id,
             correlation_id=tool_call.id,
             data=ToolInterruptedData(
@@ -831,8 +841,7 @@ class AgentSession:
         can_allow_session: bool,
         turn_id: str,
     ) -> StoredEvent:
-        return self.store.append(
-            session_id=self.metadata.session_id,
+        return self._append(
             turn_id=turn_id,
             correlation_id=tool_call.id,
             data=ApprovalRequestedData(
@@ -853,8 +862,7 @@ class AgentSession:
         decision: ApprovalDecision,
         turn_id: str,
     ) -> StoredEvent:
-        return self.store.append(
-            session_id=self.metadata.session_id,
+        return self._append(
             turn_id=turn_id,
             correlation_id=tool_call.id,
             data=ApprovalResolvedData(

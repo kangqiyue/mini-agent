@@ -128,9 +128,17 @@ class ApprovalRequest(BaseModel):
 
 
 class ApprovalPrompt(Protocol):
-    """A UI boundary that asks the user to approve one tool scope."""
+    """A decision boundary for one explicit tool scope."""
 
     def decide(self, request: ApprovalRequest) -> ApprovalDecision: ...
+
+
+class AllowOncePrompt(ApprovalPrompt):
+    """Explicitly approve each action without saving a session-wide grant."""
+
+    def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        del request
+        return ApprovalDecision.ALLOW_ONCE
 
 
 class PermissionController:

@@ -2,26 +2,83 @@
 
 from __future__ import annotations
 
-from contextlib import AbstractContextManager, nullcontext
+from collections.abc import Generator
+from contextlib import contextmanager
 
 from rich import box
 from rich.console import Console
 from rich.panel import Panel
+from rich.status import Status
 from rich.table import Table
 from rich.text import Text
 
 from mini_agent.agent import AgentStatus
+from mini_agent.events import AssistantMessageData, StoredEvent
 from mini_agent.messages import ConversationMessage, MessageRole
 from mini_agent.session import SessionSummary
 from mini_agent.system_prompt import RuntimeContext
 from mini_agent.terminal_safety import safe_terminal_text
+from mini_agent.terminal_tools import OutputMode, TerminalToolOutput
 
 
 class TerminalChatUI:
     """Render conversation boundaries without owning agent behavior."""
 
-    def __init__(self, console: Console | None = None) -> None:
+    def __init__(
+        self,
+        console: Console | None = None,
+        *,
+        output_mode: OutputMode = OutputMode.BRIEF,
+        auto_approve: bool = False,
+    ) -> None:
         self._console = console or Console()
+        self._tools = TerminalToolOutput(self._console, output_mode)
+        self._active_status: Status | None = None
+        self._can_auto_approve = auto_approve
+
+    @property
+    def output_mode(self) -> OutputMode:
+        return self._tools.mode
+
+    def handle_output_command(self, command: str) -> None:
+        parts = command.split()
+        if len(parts) > 2:
+            self._console.print("Usage: /output brief|detailed")
+            return
+        if len(parts) == 2:
+            try:
+                self._tools.mode = OutputMode(parts[1])
+            except ValueError:
+                self._console.print("Usage: /output brief|detailed")
+                return
+        self._console.print(
+            f"Output: {self.output_mode.value}. Use /history to review saved results."
+        )
+
+    def show_permissions(self, *, active_grant_count: int) -> None:
+        if self._can_auto_approve:
+            self._console.print(
+                Text(
+                    "Permissions · AUTO\n"
+                    "All tool actions are approved once without prompting.\n"
+                    "Commands and file writes execute directly with your user permissions.\n"
+                    "Workspace checks, redaction, and recovery rules still apply.\n"
+                    "This startup choice is not retained when the process exits.",
+                    style="yellow",
+                )
+            )
+            return
+        self._console.print(
+            Text(
+                "Permissions\n"
+                "• Workspace reads and search: automatic after path and content checks.\n"
+                "• File replacement: approve once, or approve this exact file for the session.\n"
+                "• New files and external commands: approve each invocation.\n"
+                "• Unknown side effects revoke the affected file grant and require review.\n"
+                f"Active file grants: {active_grant_count}\n"
+                "Empty or invalid approval input denies the operation.",
+            )
+        )
 
     def show_welcome(self, *, session_id: str | None, runtime: RuntimeContext) -> None:
         details = Table.grid(padding=(0, 1))
@@ -32,10 +89,15 @@ class TerminalChatUI:
         details.add_row("git", Text(self._git_label(runtime)))
         session_label = session_id or "not saved until the first request"
         details.add_row("session", Text(safe_terminal_text(session_label), style="dim"))
+        if self._can_auto_approve:
+            details.add_row(
+                "approvals", Text("AUTO · commands and writes run without prompts", style="yellow")
+            )
         details.add_row(
             "commands",
             Text(
-                "/system  /context  /checkpoint  /compact  /goal  /resume  /exit",
+                "/output  /history  /permissions  /system  /context  "
+                "/checkpoint  /compact  /goal  /resume  /exit",
                 style="cyan",
             ),
         )
@@ -53,24 +115,21 @@ class TerminalChatUI:
     def show_pending_status(self, runtime: RuntimeContext) -> None:
         """Render the pre-session state without implying durable work exists."""
 
-        line = Text(no_wrap=True, overflow="ellipsis")
-        line.append(f" {safe_terminal_text(runtime.model)} ", style="bold cyan")
-        for label in (
-            self._compact_git_label(runtime),
-            "ctx empty",
-            "session not saved",
-            "goal none",
-        ):
-            line.append("│", style="dim")
-            line.append(f" {safe_terminal_text(label)} ", style="dim")
-        self._console.print(line)
+        self._show_status_blocks(
+            runtime.model,
+            (
+                self._compact_git_label(runtime),
+                "ctx empty",
+                "session not saved",
+                "goal none",
+            ),
+        )
 
     def read_input(self) -> str:
-        width = max(24, min(self._console.width, 100))
-        self._console.print(Text(f"╭─ You {'─' * (width - 7)}", style="cyan"))
-        self._console.print(Text("│ ❯ ", style="bold cyan"), end="")
+        self._console.print(Text("You", style="cyan"))
+        self._console.print(Text("❯ ", style="bold cyan"), end="")
         value = input()
-        self._console.print(Text(f"╰{'─' * (width - 1)}", style="cyan"))
+        self._console.print()
         return value
 
     def show_status(self, status: AgentStatus) -> None:
@@ -86,34 +145,82 @@ class TerminalChatUI:
                 f"{context.utilization_ratio:.0%}"
             )
         checkpoint_label = (
-            f"checkpoint v{status.checkpoint_version}"
-            f"{'+' if status.has_uncommitted_events else ''}"
+            f"checkpoint v{status.checkpoint_version}{'+' if status.has_uncommitted_events else ''}"
             if status.checkpoint_version is not None
             else "checkpoint none"
         )
         goal_label = (
-            f"goal {status.goal_status.value}"
-            if status.goal_status is not None
-            else "goal none"
+            f"goal {status.goal_status.value}" if status.goal_status is not None else "goal none"
         )
-        line = Text(no_wrap=True, overflow="ellipsis")
-        line.append(f" {safe_terminal_text(status.runtime.model)} ", style="bold cyan")
-        for label in (
-            self._compact_git_label(status.runtime),
-            context_label,
-            checkpoint_label,
-            goal_label,
-        ):
-            line.append("│", style="dim")
-            line.append(f" {safe_terminal_text(label)} ", style="dim")
-        self._console.print(line)
+        self._show_status_blocks(
+            status.runtime.model,
+            (
+                self._compact_git_label(status.runtime),
+                context_label,
+                checkpoint_label,
+                goal_label,
+            ),
+        )
 
-    def thinking(self) -> AbstractContextManager[object]:
+    def _show_status_blocks(self, model: str, labels: tuple[str, ...]) -> None:
+        # Reserve the terminal's final column to avoid automatic-wrap artifacts.
+        width = max(1, self._console.width - 1)
+        model_line = Text(safe_terminal_text(model), style="bold cyan")
+        model_line.truncate(width, overflow="ellipsis")
+        self._console.print(model_line, no_wrap=True)
+        line = Text(style="dim")
+        approval_label = "approvals AUTO" if self._can_auto_approve else "approvals ask"
+        for label in (*labels, f"output {self.output_mode.value}", approval_label):
+            block = Text(safe_terminal_text(label))
+            if label == "approvals AUTO":
+                block.stylize("bold yellow")
+            block.truncate(width, overflow="ellipsis")
+            if line and line.cell_len + 3 + block.cell_len > width:
+                self._console.print(line, no_wrap=True)
+                line = Text(style="dim")
+            if line:
+                line.append(" │ ")
+            line.append_text(block)
+        if line:
+            self._console.print(line, no_wrap=True)
+
+    @contextmanager
+    def thinking(self) -> Generator[None]:
         if not self._console.is_terminal:
-            return nullcontext()
-        return self._console.status("[cyan]Mini Agent is working…[/cyan]", spinner="dots")
+            yield
+            return
+        status = self._console.status("[cyan]Mini Agent is working…[/cyan]", spinner="dots")
+        self._active_status = status
+        try:
+            with status:
+                yield
+        finally:
+            self._active_status = None
 
-    def show_assistant(self, content: str) -> None:
+    @contextmanager
+    def pause_thinking(self) -> Generator[None]:
+        status = self._active_status
+        if status is not None:
+            status.stop()
+        try:
+            yield
+        finally:
+            if status is not None and self._active_status is status:
+                status.start()
+
+    def show_event(self, event: StoredEvent) -> None:
+        data = event.data
+        if isinstance(data, AssistantMessageData) and data.tool_calls and data.content:
+            self.show_assistant(data.content, is_intermediate=True)
+        self._tools.show_event(event)
+
+    def show_assistant(self, content: str, *, is_intermediate: bool = False) -> None:
+        if is_intermediate and self.output_mode is OutputMode.BRIEF:
+            compact = " ".join(safe_terminal_text(content).split())
+            self._console.print(
+                Text("↳ " + compact[:240] + ("…" if len(compact) > 240 else ""), style="dim")
+            )
+            return
         rendered = Text(safe_terminal_text(content))
         self._console.print(
             Panel(
@@ -134,21 +241,23 @@ class TerminalChatUI:
 
         if limit < 1:
             raise ValueError("Conversation history limit must be positive")
-        visible = tuple(
-            message
-            for message in messages
+        visible_indices = tuple(
+            index
+            for index, message in enumerate(messages)
             if message.role in {MessageRole.USER, MessageRole.ASSISTANT}
             and message.content is not None
         )
-        if not visible:
+        if not visible_indices:
             return
-        selected = visible[-limit:]
-        omitted_count = len(visible) - len(selected)
+        selected = visible_indices[-limit:]
+        omitted_count = len(visible_indices) - len(selected)
         title = f"Recent conversation · {len(selected)} messages"
         if omitted_count:
             title += f" · {omitted_count} earlier omitted"
         self._console.rule(f"[bold cyan]{title}[/bold cyan]")
-        for message in selected:
+        for message in messages:
+            self._tools.remember_calls(message.tool_calls)
+        for message in messages[selected[0] :]:
             if message.role is MessageRole.USER:
                 self._console.print(
                     Panel(
@@ -160,8 +269,16 @@ class TerminalChatUI:
                         padding=(0, 1),
                     )
                 )
-            else:
-                self.show_assistant(message.content or "")
+            elif message.role is MessageRole.ASSISTANT:
+                if message.content is not None:
+                    self.show_assistant(message.content, is_intermediate=bool(message.tool_calls))
+                if self.output_mode is OutputMode.DETAILED:
+                    for call in message.tool_calls:
+                        self._tools.show_arguments(call)
+            elif message.role is MessageRole.TOOL:
+                self._tools.show_history_result(
+                    message.tool_call_id or "tool", message.content or ""
+                )
         self._console.rule("[dim]Resume here[/dim]")
 
     def show_system(self, content: str) -> None:

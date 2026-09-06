@@ -28,9 +28,7 @@ from mini_agent.events import (
 from mini_agent.goal import GoalStatus
 from mini_agent.messages import TokenUsage
 from mini_agent.permissions import (
-    ApprovalDecision,
-    ApprovalPrompt,
-    ApprovalRequest,
+    AllowOncePrompt,
     PermissionController,
 )
 from mini_agent.provider import ModelProvider
@@ -54,14 +52,6 @@ class HeadlessResult(BaseModel):
     completion_tokens: int | None = Field(default=None, ge=0)
     total_tokens: int | None = Field(default=None, ge=0)
     goal_status: GoalStatus | None = None
-
-
-class AllowOncePrompt(ApprovalPrompt):
-    """Approve every tool action once; for sandboxed benchmark workspaces only."""
-
-    def decide(self, request: ApprovalRequest) -> ApprovalDecision:
-        del request
-        return ApprovalDecision.ALLOW_ONCE
 
 
 async def run_headless_task(

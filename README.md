@@ -179,6 +179,33 @@ context`'s `Model` field. The
 append-only transcript is never rewritten; exact older details remain available
 through history and artifact retrieval tools.
 
+`/output brief` (the default) shows tool names, compact arguments, completion
+status, and errors. `/output detailed` also shows bounded arguments and results.
+`/history` replays recent conversation and tool results using the selected mode;
+switch to detailed before replaying to inspect saved output. The display choice
+survives `/resume` switches within this process; it does not change the model's
+context or the transcript. Large results include an artifact reference.
+
+`/permissions` explains the current approval rules and counts active file grants.
+Approvals show the command or file, working directory when applicable, and exact
+scope. The work indicator pauses while input is read. Enter `o` to allow once,
+`d` to deny, or `s` only when an exact-file session grant is offered; empty or
+invalid input denies. By default external commands require approval, including
+Git commands that can run configured hooks or filters.
+
+To skip tool approval prompts explicitly, start with `mini-agent --auto-approve`,
+`mini-agent chat --auto-approve`, or `mini-agent resume --auto-approve`.
+The terminal shows `approvals AUTO`: commands and writes execute directly.
+This choice lasts for this process, including `/resume` switches; a new process
+requires the flag again. Workspace validation, credential redaction, durable
+approval records, and conservative recovery still apply. The separate workspace
+configuration trust check is unchanged. Use auto approval in a trusted, isolated
+workspace; approved commands retain your operating-system user permissions.
+
+For an existing macOS Colima/LiteLLM installation, the optional
+[manual gateway startup script](scripts/local_gateway_startup/README.md) starts
+the existing services and waits for health before opening Mini Agent.
+
 Goal commands are deliberately explicit:
 
 ```text
@@ -320,11 +347,13 @@ provider as needed, so do not place
 confidential organization information there unless that provider is approved
 to receive it. This normalization is not general DLP: other absolute paths,
 organization names, domains, and project contents can still be disclosed.
-Rich also prints a compact model/Git/context/checkpoint/goal status line before
-every input, for example:
+Rich prints the model on its own line and fits Git/context/checkpoint/goal/output
+blocks to the terminal width before every input, for example:
 
 ```text
-provider/model-name │ git main │ ctx ~31.2k/83.6k 37% │ checkpoint v2+ │ goal active
+provider/model-name
+git main │ ctx ~31.2k/83.6k 37% │ checkpoint v2+ │ goal active
+output brief │ approvals ask
 ```
 
 Because automatic Git telemetry does not collect working-tree status, the line

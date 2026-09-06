@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 import sys
 import tomllib
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Literal, Never, cast
@@ -60,7 +62,12 @@ from mini_agent.host_path_redaction import (
     normalize_model_request_host_paths,
 )
 from mini_agent.messages import ConversationMessage, MessageRole, ModelRequest
-from mini_agent.permissions import ApprovalPrompt, ApprovalRequest, PermissionController
+from mini_agent.permissions import (
+    AllowOncePrompt,
+    ApprovalPrompt,
+    ApprovalRequest,
+    PermissionController,
+)
 from mini_agent.provider import ProviderError, resolve_provider_capabilities
 from mini_agent.providers import OpenAICompatibleProvider
 from mini_agent.session import (
@@ -73,11 +80,12 @@ from mini_agent.session import (
 from mini_agent.storage_paths import find_config_path, resolve_data_dir
 from mini_agent.system_prompt import SystemPromptAssembler, SystemPromptError
 from mini_agent.terminal_safety import safe_terminal_text
+from mini_agent.terminal_tools import OutputMode
 from mini_agent.terminal_ui import TerminalChatUI
-from mini_agent.tools.apply_patch import ApplyPatchTool
+from mini_agent.tools.apply_patch import ApplyPatchArguments, ApplyPatchTool
 from mini_agent.tools.artifact_read import ARTIFACT_READ_DEFINITION, ArtifactReadTool
 from mini_agent.tools.base import ToolDefinition
-from mini_agent.tools.exec_command import ExecCommandTool
+from mini_agent.tools.exec_command import ExecCommandArguments, ExecCommandTool
 from mini_agent.tools.history_read import HistoryReadTool
 from mini_agent.tools.history_search import HistorySearchTool
 from mini_agent.tools.list_directory import ListDirectoryTool
@@ -112,11 +120,21 @@ TrustOption = Annotated[
 ]
 
 
+AutoApproveOption = Annotated[
+    bool,
+    typer.Option(
+        "--auto-approve",
+        help="Approve all tool actions without prompting. Commands and writes execute directly.",
+    ),
+]
+
+
 @dataclass(frozen=True)
 class InteractiveResult:
     stop_reason: str
     resume_session_id: str | None = None
     initial_input: str | None = None
+    output_mode: OutputMode = OutputMode.BRIEF
 
 
 @dataclass(frozen=True)
@@ -160,10 +178,15 @@ def _raise_session_busy_error() -> Never:
 
 
 @app.callback()
-def main(context: typer.Context) -> None:
+def main(context: typer.Context, auto_approve: AutoApproveOption = False) -> None:
     """Start chat in the current directory when no subcommand is given."""
     if context.invoked_subcommand is None:
-        chat()
+        chat(auto_approve=auto_approve)
+    elif auto_approve:
+        raise typer.BadParameter(
+            "Place --auto-approve after chat, resume, or run when using a subcommand.",
+            param_hint="--auto-approve",
+        )
 
 
 @app.command()
@@ -348,6 +371,7 @@ def chat(
     workspace: WorkspaceOption = None,
     config_path: ConfigOption = None,
     trust_workspace_config: TrustOption = False,
+    auto_approve: AutoApproveOption = False,
 ) -> None:
     """Start chat and persist a session only when work begins."""
     resolved_workspace = _resolve_workspace(workspace)
@@ -360,6 +384,7 @@ def chat(
             config,
             resolved_workspace,
             setup=pending_setup,
+            auto_approve=auto_approve,
         )
     except SystemPromptError:
         _raise_cli_error("Configured system prompt could not be assembled safely.")
@@ -381,6 +406,8 @@ def chat(
             config,
             session,
             registrations=session.artifact_registrations,
+            output_mode=pending_result.output_mode,
+            auto_approve=auto_approve,
         )
         if stop_reason in {
             "turn_failure",
@@ -418,6 +445,8 @@ def chat(
         registrations=(),
         initial_input=pending_result.initial_input,
         show_welcome=False,
+        output_mode=pending_result.output_mode,
+        auto_approve=auto_approve,
     )
     if stop_reason in {
         "turn_failure",
@@ -436,6 +465,7 @@ def resume(
     workspace: WorkspaceOption = None,
     config_path: ConfigOption = None,
     trust_workspace_config: TrustOption = False,
+    auto_approve: AutoApproveOption = False,
 ) -> None:
     """Resume a session, defaulting to the latest one in this workspace."""
     resolved_workspace = _resolve_workspace(workspace)
@@ -493,6 +523,7 @@ def resume(
         config,
         session,
         registrations=session.artifact_registrations,
+        auto_approve=auto_approve,
     )
     if stop_reason in {
         "turn_failure",
@@ -776,10 +807,11 @@ def _run_pending_chat(
     workspace_path: Path,
     *,
     setup: _PendingChatSetup | None = None,
+    auto_approve: bool = False,
 ) -> InteractiveResult:
     """Handle local commands before any durable session exists."""
 
-    ui = TerminalChatUI()
+    ui = TerminalChatUI(auto_approve=auto_approve)
     pending_setup = setup or _prepare_pending_chat(config, workspace_path)
     prompt_assembler = pending_setup.prompt_assembler
     runtime = prompt_assembler.runtime_context()
@@ -800,6 +832,15 @@ def _run_pending_chat(
             continue
         if command == "/exit":
             return InteractiveResult(stop_reason="user_exit")
+        if command == "/output" or command.startswith("/output "):
+            ui.handle_output_command(command)
+            continue
+        if command == "/history":
+            typer.echo("No saved conversation yet.")
+            continue
+        if command == "/permissions":
+            ui.show_permissions(active_grant_count=0)
+            continue
         if command == "/system":
             runtime = prompt_assembler.runtime_context()
             ui.show_system(prompt_assembler.assemble(None, runtime=runtime).content or "")
@@ -822,8 +863,11 @@ def _run_pending_chat(
             return InteractiveResult(
                 stop_reason="resume_requested",
                 resume_session_id=candidate_id,
+                output_mode=ui.output_mode,
             )
-        return InteractiveResult(stop_reason="start_session", initial_input=user_input)
+        return InteractiveResult(
+            stop_reason="start_session", initial_input=user_input, output_mode=ui.output_mode
+        )
 
 
 def _prepare_pending_chat(
@@ -982,6 +1026,8 @@ async def _run_interactive(
     registrations: tuple[ArtifactCreatedData, ...],
     initial_input: str | None = None,
     show_welcome: bool = True,
+    output_mode: OutputMode = OutputMode.BRIEF,
+    auto_approve: bool = False,
 ) -> InteractiveResult:
     provider = OpenAICompatibleProvider(config.model)
     workspace = build_workspace_for_session(config, session)
@@ -1009,8 +1055,9 @@ async def _run_interactive(
             ExecCommandTool(workspace),
         )
     )
+    ui = TerminalChatUI(output_mode=output_mode, auto_approve=auto_approve)
     permissions = PermissionController(
-        prompt=TerminalApprovalPrompt(),
+        prompt=AllowOncePrompt() if auto_approve else TerminalApprovalPrompt(ui),
         session_grant_fingerprints=session.session_grant_fingerprints,
     )
     agent = MiniAgent(
@@ -1021,7 +1068,6 @@ async def _run_interactive(
         artifacts=artifacts,
         permissions=permissions,
     )
-    ui = TerminalChatUI()
     if show_welcome:
         ui.show_welcome(
             session_id=session.metadata.session_id,
@@ -1052,6 +1098,15 @@ async def _run_interactive(
 
             if user_input.strip() == "/exit":
                 stop_reason = "user_exit"
+                continue
+            if user_input.strip() == "/output" or user_input.strip().startswith("/output "):
+                ui.handle_output_command(user_input.strip())
+                continue
+            if user_input.strip() == "/history":
+                ui.show_recent_conversation(session.conversation_messages(), limit=30)
+                continue
+            if user_input.strip() == "/permissions":
+                ui.show_permissions(active_grant_count=len(session.session_grant_fingerprints))
                 continue
             if user_input.strip() == "/resume" or user_input.strip().startswith("/resume "):
                 requested_id = user_input.strip()[len("/resume") :].strip()
@@ -1132,7 +1187,7 @@ async def _run_interactive(
                 continue
 
             try:
-                with ui.thinking():
+                with session.observe_events(ui.show_event), ui.thinking():
                     response = await agent.run_turn(user_input)
             except ProviderError as error:
                 typer.echo(
@@ -1186,6 +1241,7 @@ async def _run_interactive(
     return InteractiveResult(
         stop_reason=stop_reason,
         resume_session_id=resume_session_id,
+        output_mode=ui.output_mode,
     )
 
 
@@ -1345,6 +1401,8 @@ def _run_interactive_safely(
     registrations: tuple[ArtifactCreatedData, ...],
     initial_input: str | None = None,
     show_welcome: bool = True,
+    output_mode: OutputMode = OutputMode.BRIEF,
+    auto_approve: bool = False,
 ) -> InteractiveResult:
     """Run and close one interactive session without printing unexpected exceptions."""
 
@@ -1356,6 +1414,8 @@ def _run_interactive_safely(
                 registrations=registrations,
                 initial_input=initial_input,
                 show_welcome=show_welcome,
+                output_mode=output_mode,
+                auto_approve=auto_approve,
             )
         )
     except (Exception, KeyboardInterrupt):
@@ -1381,6 +1441,8 @@ def _run_session_chain(
     registrations: tuple[ArtifactCreatedData, ...],
     initial_input: str | None = None,
     show_welcome: bool = True,
+    output_mode: OutputMode = OutputMode.BRIEF,
+    auto_approve: bool = False,
 ) -> str:
     """Run slash-command session switches without holding two writer locks."""
 
@@ -1388,12 +1450,15 @@ def _run_session_chain(
     current_registrations = registrations
     current_initial_input = initial_input
     current_show_welcome = show_welcome
+    current_output_mode = output_mode
     while True:
         if current_initial_input is None and current_show_welcome:
             result = _run_interactive_safely(
                 config,
                 current_session,
                 registrations=current_registrations,
+                output_mode=current_output_mode,
+                auto_approve=auto_approve,
             )
         else:
             result = _run_interactive_safely(
@@ -1402,9 +1467,12 @@ def _run_session_chain(
                 registrations=current_registrations,
                 initial_input=current_initial_input,
                 show_welcome=current_show_welcome,
+                output_mode=current_output_mode,
+                auto_approve=auto_approve,
             )
         current_initial_input = None
         current_show_welcome = True
+        current_output_mode = result.output_mode
         if result.stop_reason != "resume_requested":
             return result.stop_reason
         if result.resume_session_id is None:
@@ -1470,16 +1538,26 @@ def build_workspace_for_session(config: MiniAgentConfig, session: AgentSession) 
 class TerminalApprovalPrompt(ApprovalPrompt):
     """Ask for an explicit terminal decision using only redacted arguments."""
 
+    def __init__(self, ui: TerminalChatUI | None = None) -> None:
+        self._ui = ui
+
     def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        pause = self._ui.pause_thinking() if self._ui is not None else nullcontext()
+        with pause:
+            return self._decide_without_spinner(request)
+
+    def _decide_without_spinner(self, request: ApprovalRequest) -> ApprovalDecision:
         typer.echo()
         typer.echo(f"Approval required: {safe_terminal_text(request.tool_name)}")
+        self._explain_request(request)
+        typer.echo("Full arguments:")
         typer.echo(safe_terminal_text(request.redacted_arguments))
-        choices = "[o]nce / [d]eny"
+        choices = "o = allow once / d = deny"
         if request.can_allow_session:
-            choices = "[o]nce / exact [s]ame file path this session / [d]eny"
+            choices = "o = allow once / s = exact same file path this session / d = deny"
 
         try:
-            answer = input(f"allow {choices}? ").strip().lower()
+            answer = input(f"{choices} (default d): ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             typer.echo()
             return ApprovalDecision.DENY
@@ -1488,7 +1566,34 @@ class TerminalApprovalPrompt(ApprovalPrompt):
             return ApprovalDecision.ALLOW_ONCE
         if request.can_allow_session and answer in {"s", "session"}:
             return ApprovalDecision.ALLOW_SESSION
+        if answer not in {"", "d", "deny"}:
+            typer.echo("That choice is not allowed for this operation; denied.")
         return ApprovalDecision.DENY
+
+    @staticmethod
+    def _explain_request(request: ApprovalRequest) -> None:
+        try:
+            if request.tool_name == "exec_command":
+                command = ExecCommandArguments.model_validate_json(request.redacted_arguments)
+                typer.echo(safe_terminal_text(f"Command: {shlex.join(command.argv)}"))
+                typer.echo(safe_terminal_text(f"Directory: {command.cwd}"))
+                typer.echo("Rule: external commands require approval with your user permissions.")
+                if Path(command.argv[0]).name == "git":
+                    typer.echo("Git commands may invoke repository hooks or configured filters.")
+            elif request.tool_name == "apply_patch":
+                patch = ApplyPatchArguments.model_validate_json(request.redacted_arguments)
+                change = patch.changes[0]
+                action = "Create" if change.creates_file else "Replace"
+                typer.echo(safe_terminal_text(f"File: {action} {change.path}"))
+                typer.echo("Rule: file writes require approval and fresh workspace validation.")
+        except ValidationError:
+            typer.echo("Review the complete arguments below; no broader scope is inferred.")
+        if request.can_allow_session:
+            typer.echo(
+                "Session scope: this exact file path; future replacements still check content."
+            )
+        else:
+            typer.echo("Scope: this invocation only; no session-wide command approval.")
 
 
 if __name__ == "__main__":

@@ -43,6 +43,13 @@ lifecycle boundaries; it does not decide agent actions.
 | Durable sessions | `session.py`, `events.py`, `event_store.py`, `session_recovery.py` | Append-only state, publication, validation, crash recovery |
 | Checkpoints | `checkpoint.py`, `checkpoint_writer.py`, `checkpoint_model.py` | Immutable checkpoint storage, serialized extraction, deterministic fallback |
 | Tools and approval | `tools/`, `workspace.py`, `workspace_directory_fd.py`, `workspace_subprocess.py`, `permissions.py`, `tool_facts.py` | Workspace validation, directory-descriptor anchoring, approval scopes, execution, structured completion facts |
+
+Interactive CLI rendering observes typed session events only after the event
+store has redacted and durably appended them. The scoped observer does not decide
+permissions or modify the transcript. A renderer failure propagates and stops
+the turn; recovery reads the durable event to distinguish completed operations
+from unknown side effects. Terminal verbosity affects display only, and tool
+detail views are bounded. Headless execution does not install this observer.
 | Large results and retrieval | `artifacts.py`, `history.py` | Redacted externalization and bounded exact-data recovery |
 | Task state and evidence | `goal.py` | Durable goal lifecycle and mechanical completion gate |
 | Evaluation | `evaluation.py`, `benchmark.py` | Deterministic information-retention and runtime regression evidence |
