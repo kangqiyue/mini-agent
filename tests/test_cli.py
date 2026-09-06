@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from pydantic import HttpUrl
+from rich.text import Text
 from typer.testing import CliRunner
 
 from mini_agent import cli as cli_module
@@ -155,7 +156,8 @@ def test_chat_rejects_unsendable_first_request_before_creating_session(
 
     assert result.exit_code == 1, result.output
     assert "Configuration cannot fit the required model request." in result.output
-    assert str(tmp_path) not in result.output
+    # The welcome panel shows the workspace on stdout; the diagnostic must not.
+    assert str(tmp_path) not in result.stderr
     assert "chat/completions" not in result.output
     assert not data_dir.exists()
 
@@ -358,7 +360,7 @@ def test_chat_missing_system_instructions_has_safe_pending_diagnostic(
         result.output
     )
     assert "Traceback" not in result.output
-    assert str(tmp_path) not in result.output
+    assert str(tmp_path) not in result.stderr
     assert "missing-project-instructions.md" not in result.output
     assert not (data_dir / "sessions").exists()
 
@@ -848,7 +850,7 @@ def test_resume_finalization_failure_returns_nonzero_without_stopped_event(
     )
     assert "Traceback" not in result.output
     assert secret not in result.output
-    assert str(tmp_path) not in result.output
+    assert str(tmp_path) not in result.stderr
     resumed = AgentSession.load(data_dir=data_dir, session_id=session_id)
     try:
         assert all(event.data.kind != "session_stopped" for event in resumed.events)
@@ -1125,8 +1127,8 @@ def test_resume_with_an_exact_id_rejects_a_different_workspace_before_writing(
         )
 
         assert rejected.exit_code != 0
-        assert "Requested session belongs to a different workspace." in " ".join(
-            rejected.output.replace("│", "").split()
+        assert "Requested session belongs to a different workspace." in _plain_cli_output(
+            rejected.output
         )
         assert session_id not in rejected.output
         assert str(first_workspace) not in rejected.output
@@ -1503,7 +1505,7 @@ def test_chat_provider_cleanup_failure_returns_nonzero_with_redacted_diagnostic(
     assert result.exit_code == 1, result.output
     assert "Agent cleanup failed; resume the session before continuing." in result.output
     assert secret not in result.output
-    assert str(tmp_path) not in result.output
+    assert str(tmp_path) not in result.stderr
     assert "Traceback" not in result.output
     session_id = list_sessions(data_dir)[0].session_id
     resumed = AgentSession.load(data_dir=data_dir, session_id=session_id)
@@ -1760,9 +1762,9 @@ def _tree_bytes(root: Path) -> dict[Path, bytes | None]:
 
 
 def _plain_cli_output(output: str) -> str:
-    """Normalize Rich's visual borders so stable messages can wrap safely."""
+    """Ignore ANSI styling and borders when checking wrapped diagnostics."""
 
-    return " ".join(output.replace("│", "").split())
+    return " ".join(Text.from_ansi(output).plain.replace("│", "").split())
 
 
 def _write_config(config_path: Path, *, data_dir: Path, model: str) -> None:

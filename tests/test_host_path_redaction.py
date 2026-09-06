@@ -1,4 +1,5 @@
 import json
+import sys
 import tempfile
 from pathlib import Path
 
@@ -189,6 +190,7 @@ def test_redact_host_paths_handles_verified_darwin_private_tmp_alias() -> None:
     assert result.match_count == 1
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Requires Darwin path-redaction rules")
 def test_redact_host_paths_handles_case_variant_on_case_insensitive_darwin_volume(
     tmp_path: Path,
 ) -> None:
@@ -230,10 +232,12 @@ def test_redact_host_paths_keeps_linux_case_variants_as_ordinary_text(
     assert result.match_count == 0
 
 
+@pytest.mark.parametrize("nested_directory", ("", "nested"))
 def test_redact_host_paths_handles_mixed_json_escaped_separators_in_prose(
     tmp_path: Path,
+    nested_directory: str,
 ) -> None:
-    workspace = tmp_path / "工作目录"
+    workspace = tmp_path / nested_directory / "工作目录"
     home = tmp_path / "家"
 
     def mixed_json_separators(path: Path) -> str:
@@ -259,8 +263,9 @@ def test_redact_host_paths_handles_mixed_json_escaped_separators_in_prose(
     assert str(home) not in result.text
     assert escaped_workspace not in result.text
     assert escaped_home not in result.text
-    assert "<workspace-root>" in result.text
-    assert "src\\/main.py" in result.text
+    # Escaping alternates with path depth, which differs across CI platforms.
+    relative_suffix = escaped_workspace[len(mixed_json_separators(workspace)) :]
+    assert f"<workspace-root>{relative_suffix}" in result.text
     assert "<home>\\/.cache" in result.text
     assert redact_host_paths(
         result.text,

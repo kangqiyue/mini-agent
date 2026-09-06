@@ -31,7 +31,12 @@ def test_commit_and_remote_secret_checks_are_configured() -> None:
     assert "id: gitleaks" in hooks
     assert "scripts/check_public_tree.py --staged" in hooks
     assert "scripts/check_public_tree.py --commit-message" in hooks
-    assert "gitleaks/gitleaks-action@v2" in workflow
+    assert "uv run --no-sync ruff check ." in hooks
+    assert "sha256sum --check --strict" in workflow
+    assert 'gitleaks git . --log-opts="--all" --redact' in workflow
+    assert "gitleaks dir . --redact" in workflow
+    assert "contents: read" in workflow
+    assert "GITHUB_TOKEN" not in workflow
     assert "fetch-depth: 0" in workflow
     assert "scripts/check_public_tree.py --tracked" in workflow
 

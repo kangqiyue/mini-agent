@@ -14,6 +14,13 @@ repos:
 
   - repo: local
     hooks:
+      - id: repository-ruff
+        name: Check all repository Python files with Ruff
+        entry: uv run --no-sync ruff check .
+        language: system
+        stages: [pre-commit]
+        always_run: true
+        pass_filenames: false
       - id: public-tree-safety
         name: Reject private files and local identity leaks
         entry: python scripts/check_public_tree.py --staged

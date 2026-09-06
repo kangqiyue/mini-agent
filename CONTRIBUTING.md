@@ -22,11 +22,15 @@ ownership, durable lifecycles, or trust boundaries.
 
 ## Development setup
 
+Install `ripgrep` (`rg`) before running the offline suite: the search integration
+tests use the real executable. CI installs it explicitly on both supported
+operating systems.
+
 ```bash
 uv sync --extra dev --locked --no-install-project
 uv sync --extra dev --locked --no-build-isolation
 uv run pre-commit install
-uv run pytest
+uv run pytest tests scripts/local_gateway_startup/test_startup.py
 uv run ruff check .
 uv run pyright
 uv build --no-build-isolation
@@ -40,7 +44,10 @@ history scans, the private denylist, and wheel installation smoke tests.
 The first sync installs the locked development toolchain, including
 `hatchling==1.32.0` and `editables==0.6`, which Hatchling needs for editable
 installs. The second installs this project without build isolation. Keep that
-order for local release-equivalent checks, using the required `uv==0.11.28`.
+order for local release-equivalent checks, using the CI-pinned `uv==0.11.28`.
+The project declares a minimum uv version so Dependabot can use its newer
+managed version. Dependency updates must still pass the pinned CI toolchain
+and `--locked` checks.
 
 Add pytest coverage for normal behavior, boundaries, and failure semantics.
 Changes to durable events must remain backward compatible or include an
@@ -69,7 +76,8 @@ repository-local `runtime.data_dir` you choose to Git ignore rules yourself. The
 configuration field. Do not add symbolic links or local credential-store files
 to the public tree.
 
-The pre-commit hooks run Gitleaks and the repository privacy check on staged
+The pre-commit hooks run repository-wide Ruff (including tracked acceptance
+scripts under `reports`), plus Gitleaks and the repository privacy check on staged
 content and commit messages. They provide fast local feedback; `--no-verify`
 can bypass them, so configure `Security / secrets`, `CI / release-gate`, and
 CODEOWNER approval as required GitHub checks.
@@ -83,6 +91,9 @@ See [docs/RELEASING.md](docs/RELEASING.md) for the maintainer preflight and
 first-publication sequence.
 
 The GitHub security workflow scans pushes and pull requests without receiving
-the private organization denylist. Branch protection and GitHub push
+the private organization denylist. It verifies a pinned Gitleaks release, scans
+the complete checked-out history and current tree, and needs only read access
+to repository contents. It does not depend on the previous push revision or
+pull request API access. Branch protection and GitHub push
 protection remain necessary because a workflow runs after content reaches the
 remote.

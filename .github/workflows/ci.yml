@@ -27,11 +27,21 @@ jobs:
         with:
           version: "0.11.28"
           enable-cache: true
+      - name: Install ripgrep on Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
+      - name: Install ripgrep on macOS
+        if: runner.os == 'macOS'
+        run: brew install ripgrep
+      - name: Verify search dependency
+        run: rg --version
       - run: uv sync --extra dev --locked --no-install-project
       - run: uv sync --extra dev --locked --no-build-isolation
       - run: uv run --no-sync ruff check .
       - run: uv run --no-sync pyright
-      - run: uv run --no-sync pytest
+      - run: uv run --no-sync pytest tests scripts/local_gateway_startup/test_startup.py
       - run: uv build --no-build-isolation
       - run: uv run --no-sync mini-agent --help
       - run: python -m venv .wheel-smoke

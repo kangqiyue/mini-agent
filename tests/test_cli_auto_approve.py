@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from pydantic import HttpUrl
+from rich.text import Text
 from typer.testing import CliRunner
 
 from mini_agent import cli
@@ -34,8 +35,9 @@ def test_misplaced_auto_approval_option_is_never_silently_ignored() -> None:
         result = runner.invoke(cli.app, ["--auto-approve", "chat"])
 
     assert result.exit_code == 2
-    assert "Place --auto-approve" in result.output
-    assert "subcommand" in result.output
+    plain_output = " ".join(Text.from_ansi(result.output).plain.replace("│", "").split())
+    assert "Place --auto-approve" in plain_output
+    assert "subcommand" in plain_output
     interactive.assert_not_called()
 
 

@@ -7,7 +7,6 @@ session storage are the production implementations.
 
 from __future__ import annotations
 
-import asyncio
 import os
 import pty
 import select
@@ -309,7 +308,9 @@ def main() -> None:
     (CACHE / "spinner_pause.ansi").write_text(transcript, encoding="utf-8")
     approval_offset = transcript.find("Approval required: exec_command")
     denied_offset = transcript.find("✗ exec_command · permission_denied")
-    prompt_segment = transcript[approval_offset:denied_offset] if denied_offset > approval_offset else ""
+    prompt_segment = (
+        transcript[approval_offset:denied_offset] if denied_offset > approval_offset else ""
+    )
     has_working_during_prompt = "Mini Agent is working" in prompt_segment
     prompt_visible = approval_offset >= 0 and denied_offset > approval_offset
     print(
