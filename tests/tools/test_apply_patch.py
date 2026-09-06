@@ -12,7 +12,12 @@ from mini_agent.permissions import (
     PermissionController,
     built_in_apply_patch_session_grant,
 )
-from mini_agent.tools.apply_patch import MAX_PATCH_CONTENT_BYTES, ApplyPatchTool
+from mini_agent.tools.apply_patch import (
+    MAX_PATCH_CONTENT_BYTES,
+    ApplyPatchArguments,
+    ApplyPatchTool,
+    FileReplacement,
+)
 from mini_agent.tools.base import ToolError
 from mini_agent.workspace import Workspace
 from tests.support.synthetic_secrets import synthetic_stripe_access_token
@@ -29,6 +34,139 @@ def test_apply_patch_replaces_existing_file_after_exact_match(tmp_path: Path) ->
     assert result.content == "Modified files:\n- notes.txt"
     assert result.is_truncated is False
     assert tool.definition.is_read_only is False
+
+
+def _create_arguments(path: str, replacement_content: str) -> str:
+    return json.dumps(
+        {
+            "changes": [
+                {
+                    "path": path,
+                    "replacement_content": replacement_content,
+                }
+            ]
+        }
+    )
+
+
+def test_apply_patch_creates_new_file_without_expected_content(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    tool = ApplyPatchTool(Workspace(tmp_path))
+
+    result = tool.execute(_create_arguments("src/new_file.py", "print('hello')\n"))
+
+    created = tmp_path / "src" / "new_file.py"
+    assert created.read_text(encoding="utf-8") == "print('hello')\n"
+    assert stat.S_IMODE(created.stat().st_mode) == 0o644
+    assert result.content == "Modified files:\n- src/new_file.py"
+    assert result.facts is not None
+    assert result.facts.modified_paths == ("src/new_file.py",)
+    # No temporary files remain next to the created file.
+    assert [entry.name for entry in (tmp_path / "src").iterdir()] == ["new_file.py"]
+
+
+def test_apply_patch_create_rejects_existing_target_without_clobbering(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "notes.txt"
+    target.write_text("existing", encoding="utf-8")
+    tool = ApplyPatchTool(Workspace(tmp_path))
+
+    with pytest.raises(ToolError) as error_info:
+        tool.execute(_create_arguments("notes.txt", "attacker content"))
+
+    assert error_info.value.code == "target_exists"
+    assert target.read_text(encoding="utf-8") == "existing"
+    assert [entry.name for entry in tmp_path.iterdir()] == ["notes.txt"]
+
+
+def test_apply_patch_create_preflight_rejects_existing_target(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "notes.txt"
+    target.write_text("existing", encoding="utf-8")
+    tool = ApplyPatchTool(Workspace(tmp_path))
+
+    with pytest.raises(ToolError) as error_info:
+        tool.preflight(_create_arguments("notes.txt", "content"))
+
+    assert error_info.value.code == "target_exists"
+
+
+def test_apply_patch_create_rejects_missing_parent_directory(tmp_path: Path) -> None:
+    tool = ApplyPatchTool(Workspace(tmp_path))
+
+    with pytest.raises(ToolError) as error_info:
+        tool.execute(_create_arguments("missing_dir/notes.txt", "content"))
+
+    assert error_info.value.code == "invalid_path"
+
+
+def test_apply_patch_create_rejects_sensitive_path(tmp_path: Path) -> None:
+    tool = ApplyPatchTool(Workspace(tmp_path))
+
+    with pytest.raises(ToolError) as error_info:
+        tool.execute(_create_arguments(".git/HEAD", "content"))
+
+    assert error_info.value.code == "sensitive_path"
+    assert not (tmp_path / ".git").exists()
+
+
+def test_apply_patch_create_rejects_sensitive_replacement_content(
+    tmp_path: Path,
+) -> None:
+    tool = ApplyPatchTool(Workspace(tmp_path))
+    secret = synthetic_stripe_access_token("CREATE")
+
+    with pytest.raises(ToolError) as error_info:
+        tool.execute(_create_arguments("notes.txt", f"api = '{secret}'"))
+
+    assert error_info.value.code == "sensitive_replacement_content"
+    assert not (tmp_path / "notes.txt").exists()
+
+
+def test_apply_patch_create_mints_no_session_grant_scope(tmp_path: Path) -> None:
+    tool = ApplyPatchTool(Workspace(tmp_path))
+
+    # A create never yields a path-bound session grant: an approved creation
+    # must not authorize a later replacement at the same path.
+    assert tool.session_grant_scope(_create_arguments("notes.txt", "content")) is None
+
+
+def test_apply_patch_create_rejects_symlink_target(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    link = tmp_path / "linked.txt"
+    link.symlink_to(outside)
+    tool = ApplyPatchTool(Workspace(tmp_path))
+
+    with pytest.raises(ToolError) as error_info:
+        tool.execute(_create_arguments("linked.txt", "content"))
+
+    assert outside.read_text(encoding="utf-8") == "outside"
+    assert link.is_symlink()
+    assert error_info.value.code == "invalid_path"
+
+
+def test_apply_patch_explicit_null_expected_content_selects_create(
+    tmp_path: Path,
+) -> None:
+    tool = ApplyPatchTool(Workspace(tmp_path))
+    arguments = json.dumps(
+        {
+            "changes": [
+                {
+                    "path": "notes.txt",
+                    "expected_content": None,
+                    "replacement_content": "created",
+                }
+            ]
+        }
+    )
+
+    tool.execute(arguments)
+
+    assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "created"
 
 
 def test_apply_patch_rejects_workspace_root_replaced_after_workspace_initialization(
@@ -565,6 +703,103 @@ def test_apply_patch_reports_unknown_status_after_replace_when_directory_sync_fa
 
     assert error_info.value.code == "write_status_unknown"
     assert target.read_text(encoding="utf-8") == "after"
+
+
+@pytest.mark.parametrize("operation", ["preflight", "execute"])
+def test_apply_patch_create_rejects_an_excluded_leaf(
+    tmp_path: Path, operation: str
+) -> None:
+    target = tmp_path / "runtime-store"
+    tool = ApplyPatchTool(Workspace(tmp_path, excluded_roots=(target,)))
+    arguments = ApplyPatchArguments(changes=(FileReplacement(
+        path=target.name, replacement_content="new file",
+    ),)).model_dump_json()
+
+    with pytest.raises(ToolError, match="workspace"):
+        if operation == "preflight":
+            tool.preflight(arguments)
+        else:
+            tool.execute(arguments)
+    assert not target.exists()
+
+
+def test_apply_patch_create_reports_unknown_when_link_lands_then_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_link = os.link
+
+    def link_then_raise(
+        source: str, destination: str, *, src_dir_fd: int, dst_dir_fd: int,
+        follow_symlinks: bool = True,
+    ) -> None:
+        original_link(source, destination, src_dir_fd=src_dir_fd,
+                      dst_dir_fd=dst_dir_fd, follow_symlinks=follow_symlinks)
+        raise OSError("simulated post-link failure")
+
+    monkeypatch.setattr(apply_patch_module.os, "link", link_then_raise)
+    tool = ApplyPatchTool(Workspace(tmp_path))
+    with pytest.raises(ToolError) as error_info:
+        tool.execute(_create_arguments("notes.txt", "created"))
+
+    assert error_info.value.code == "write_status_unknown"
+    assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "created"
+    assert [entry.name for entry in tmp_path.iterdir()] == ["notes.txt"]
+
+
+def test_apply_patch_create_never_overwrites_a_concurrent_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_link = os.link
+
+    def create_before_link(
+        source: str, destination: str, *, src_dir_fd: int, dst_dir_fd: int,
+        follow_symlinks: bool = True,
+    ) -> None:
+        (tmp_path / destination).write_text("concurrent", encoding="utf-8")
+        original_link(source, destination, src_dir_fd=src_dir_fd,
+                      dst_dir_fd=dst_dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(apply_patch_module.os, "link", create_before_link)
+    tool = ApplyPatchTool(Workspace(tmp_path))
+    with pytest.raises(ToolError) as error_info:
+        tool.execute(_create_arguments("notes.txt", "created"))
+
+    assert error_info.value.code == "target_exists"
+    assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "concurrent"
+
+
+def test_apply_patch_closes_open_target_when_it_grows_past_the_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "notes.txt"
+    target.write_text("before", encoding="utf-8")
+    tool = ApplyPatchTool(Workspace(tmp_path))
+    original_open = apply_patch_module.open_regular_at
+    descriptors: list[int] = []
+
+    def open_then_grow(parent_descriptor: int, leaf_name: str) -> int:
+        descriptor = original_open(parent_descriptor, leaf_name)
+        descriptors.append(descriptor)
+        if len(descriptors) == 2:
+            target.write_bytes(b"x" * (MAX_PATCH_CONTENT_BYTES + 1))
+        return descriptor
+
+    monkeypatch.setattr(apply_patch_module, "open_regular_at", open_then_grow)
+    with pytest.raises(ToolError) as error_info:
+        tool.execute(_arguments("notes.txt", "before", "after"))
+    assert error_info.value.code == "file_too_large"
+    assert len(descriptors) == 2
+    try:
+        with pytest.raises(OSError):
+            os.fstat(descriptors[-1])
+    finally:
+        # Keep the failing regression run from itself retaining the leaked fd.
+        try:
+            os.fstat(descriptors[-1])
+        except OSError:
+            pass
+        else:
+            os.close(descriptors[-1])
 
 
 def _arguments(path: str, expected_content: str, replacement_content: str) -> str:

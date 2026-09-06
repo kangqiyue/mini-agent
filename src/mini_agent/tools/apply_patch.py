@@ -31,17 +31,25 @@ MAX_PATCH_CONTENT_BYTES = 256 * 1024
 
 
 class FileReplacement(BaseModel):
-    """A full-file replacement guarded by its current content."""
+    """A full-file replacement guarded by its current content, or a creation.
+
+    ``expected_content`` omitted (null) selects creation: the target must not
+    exist and ``replacement_content`` becomes the new file's content.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     path: str = Field(min_length=1)
-    expected_content: str
+    expected_content: str | None = None
     replacement_content: str
+
+    @property
+    def creates_file(self) -> bool:
+        return self.expected_content is None
 
 
 class ApplyPatchArguments(BaseModel):
-    """Validated inputs for one atomic, per-file replacement."""
+    """Validated inputs for one atomic, per-file change."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -95,8 +103,21 @@ class _ValidatedReplacement:
     opened_target: _OpenedWorkspaceTarget
 
 
+@dataclass
+class _ValidatedCreation:
+    """A new-file target whose parent directory is held open by descriptor."""
+
+    relative_path: str
+    replacement_content: str
+    parent_context: AbstractContextManager[OpenWorkspaceParent]
+    parent: OpenWorkspaceParent
+
+    def close(self) -> None:
+        self.parent_context.__exit__(None, None, None)
+
+
 class ApplyPatchTool:
-    """Replace existing workspace files after all expected-content checks pass."""
+    """Replace existing workspace files, or create new ones, atomically."""
 
     def __init__(self, workspace: Workspace) -> None:
         self._workspace = workspace
@@ -107,50 +128,63 @@ class ApplyPatchTool:
         return ToolDefinition(
             name="apply_patch",
             description=(
-                "Atomically replace one existing workspace file when its current "
-                "content exactly matches the supplied expected content."
+                "Atomically change one workspace file. Omit expected_content to "
+                "create a new file (it must not already exist); provide it to "
+                "replace an existing file when its current content matches "
+                "expected_content exactly."
             ),
             parameters=ApplyPatchArguments.model_json_schema(),
             is_read_only=False,
         )
 
     def execute(self, arguments_json: str) -> ToolResult:
-        replacements: tuple[_ValidatedReplacement, ...] | None = None
+        replacement: _ValidatedReplacement | None = None
+        creation: _ValidatedCreation | None = None
         try:
             self.preflight(arguments_json)
             arguments = self._parse_preflight_arguments(arguments_json)
-            replacements = self._validate_all_changes(arguments.changes)
+            change = arguments.changes[0]
+            if change.creates_file:
+                creation = self._validate_creation(change)
+            else:
+                replacement = self._validate_all_changes(arguments.changes)[0]
         except ValidationError as error:
             raise ToolError("invalid_arguments", "Invalid apply_patch arguments") from error
         except SensitiveWorkspacePathError as error:
             raise ToolError(
                 "sensitive_path", "Sensitive workspace paths cannot be modified"
             ) from error
-        except (FileNotFoundError, WorkspacePathError) as error:
+        except (OSError, WorkspacePathError) as error:
             raise self._invalid_path_error() from error
 
-        assert replacements is not None
-        try:
-            self._write_replacement(replacements[0])
-        finally:
-            replacements[0].opened_target.close()
-
-        changed_paths = "\n".join(f"- {item.relative_path}" for item in replacements)
+        changed_path: str
+        if creation is not None:
+            try:
+                self._write_creation(creation)
+            finally:
+                creation.close()
+            changed_path = creation.relative_path
+        else:
+            assert replacement is not None
+            try:
+                self._write_replacement(replacement)
+            finally:
+                replacement.opened_target.close()
+            changed_path = replacement.relative_path
         return ToolResult(
-            content=f"Modified files:\n{changed_paths}",
-            facts=ToolCompletionFacts(
-                modified_paths=tuple(item.relative_path for item in replacements)
-            ),
+            content=f"Modified files:\n- {changed_path}",
+            facts=ToolCompletionFacts(modified_paths=(changed_path,)),
         )
 
     def preflight(self, arguments_json: str) -> None:
-        """Reject unsafe replacement payloads before the agent starts the tool.
+        """Reject unsafe change payloads before the agent starts the tool.
 
         This method has no write side effects.  It reads workspace metadata to
-        reject paths that cannot safely identify one existing regular file. The
-        agent calls it after recording the requested tool call but before
-        approval or ``tool_started``; direct callers receive the same
-        protection through :meth:`execute`.
+        reject paths that cannot safely identify their target: an existing
+        regular file for replacement, or an existing parent directory with an
+        absent leaf for creation.  The agent calls it after recording the
+        requested tool call but before approval or ``tool_started``; direct
+        callers receive the same protection through :meth:`execute`.
         """
 
         try:
@@ -161,13 +195,21 @@ class ApplyPatchTool:
         self._require_bounded_patch_content(change)
         self._reject_sensitive_replacement_content(change)
         try:
-            self._validate_path_eligibility(change.path)
+            opened = (
+                self._open_create_target(change.path)
+                if change.creates_file
+                else None
+            )
+            if opened is None:
+                self._validate_path_eligibility(change.path)
         except SensitiveWorkspacePathError as error:
             raise ToolError(
                 "sensitive_path", "Sensitive workspace paths cannot be modified"
             ) from error
         except (FileNotFoundError, WorkspacePathError, OSError) as error:
             raise self._invalid_path_error() from error
+        if opened is not None:
+            opened.close()
 
     @staticmethod
     def _invalid_path_error() -> ToolError:
@@ -175,7 +217,8 @@ class ApplyPatchTool:
 
         return ToolError(
             "invalid_path",
-            "apply_patch target must be an existing regular workspace file",
+            "apply_patch requires a regular workspace file or a new file "
+            "in an existing workspace directory",
         )
 
     def _validate_path_eligibility(self, relative_path: str) -> None:
@@ -186,12 +229,19 @@ class ApplyPatchTool:
         opened_target.close()
 
     def session_grant_scope(self, arguments_json: str) -> str | None:
-        """Return a stable scope for one non-symlink canonical workspace file."""
+        """Return a stable scope for one non-symlink canonical workspace file.
+
+        Creation never mints a session grant: an approved create must not
+        authorize a later replacement at the same path, so each creation is
+        approved on its own.
+        """
 
         try:
             self.preflight(arguments_json)
             arguments = self._parse_preflight_arguments(arguments_json)
             change = arguments.changes[0]
+            if change.creates_file:
+                return None
             self._reject_parent_path(change.path)
             if self._workspace.has_symlink_component(change.path):
                 return None
@@ -210,12 +260,13 @@ class ApplyPatchTool:
         self, changes: tuple[FileReplacement, ...]
     ) -> tuple[_ValidatedReplacement, ...]:
         change = changes[0]
+        assert change.expected_content is not None
         self._reject_parent_path(change.path)
         opened_target = self._open_existing_target(change.path)
         original_identity = opened_target.target_identity
-        self._require_bounded_target(original_identity)
-        self._require_bounded_patch_content(change)
         try:
+            self._require_bounded_target(original_identity)
+            self._require_bounded_patch_content(change)
             current_content = self._read_current_content(opened_target.target_descriptor)
             confirmed_identity = self._file_identity_from_descriptor(
                 opened_target.target_descriptor
@@ -325,10 +376,13 @@ class ApplyPatchTool:
             raise ToolError("file_too_large", "Target exceeds the patch byte limit")
 
     def _require_bounded_patch_content(self, change: FileReplacement) -> None:
-        for field_name, content in (
-            ("expected_content", change.expected_content),
+        expected = change.expected_content
+        fields: tuple[tuple[str, str], ...] = (
             ("replacement_content", change.replacement_content),
-        ):
+        )
+        if expected is not None:
+            fields = (("expected_content", expected), *fields)
+        for field_name, content in fields:
             try:
                 content_size = len(content.encode("utf-8"))
             except UnicodeEncodeError as error:
@@ -388,6 +442,152 @@ class ApplyPatchTool:
             or current_content != replacement.expected_content
         ):
             raise ToolError("target_changed", "Target changed before replacement")
+
+    def _validate_creation(self, change: FileReplacement) -> _ValidatedCreation:
+        """Validate one new-file change while holding its parent directory."""
+
+        creation = self._open_create_target(change.path)
+        try:
+            self._require_bounded_patch_content(change)
+            self._reject_sensitive_replacement_content(change)
+            creation.replacement_content = change.replacement_content
+        except BaseException:
+            creation.close()
+            raise
+        return creation
+
+    def _open_create_target(self, relative_path: str) -> _ValidatedCreation:
+        """Hold the target's parent open and require the leaf to be absent.
+
+        The descriptor-held parent is the write boundary; the absence check is
+        a friendly early error.  The later ``os.link`` with ``O_EXCL``
+        semantics is the authoritative no-clobber decision.
+        """
+
+        self._reject_parent_path(relative_path)
+        self._workspace.resolve_creatable_file_path(relative_path)
+        path_parts = tuple(part for part in Path(relative_path).parts if part != ".")
+        if not path_parts:
+            raise WorkspacePathError("apply_patch requires a file path")
+        parent_context = self._directory_anchor.open_existing_parent(relative_path)
+        opened_parent: OpenWorkspaceParent | None = None
+        try:
+            opened_parent = parent_context.__enter__()
+            try:
+                os.stat(
+                    opened_parent.leaf_name,
+                    dir_fd=opened_parent.parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                raise WorkspacePathError(
+                    "apply_patch target cannot be inspected safely"
+                ) from error
+            else:
+                raise ToolError("target_exists", "Target already exists")
+            return _ValidatedCreation(
+                relative_path=Path(*path_parts).as_posix(),
+                replacement_content="",
+                parent_context=parent_context,
+                parent=opened_parent,
+            )
+        except BaseException:
+            if opened_parent is not None:
+                parent_context.__exit__(None, None, None)
+            raise
+
+    def _verify_create_route_is_current(self, creation: _ValidatedCreation) -> None:
+        """Ensure the original root still reaches the held parent directory."""
+
+        current_parent_descriptor = -1
+        try:
+            current_parent_descriptor = self._directory_anchor.reopen_parent(
+                creation.parent
+            )
+        except (WorkspaceDirectoryFdError, OSError) as error:
+            raise ToolError("target_changed", "Target parent changed before creation") from error
+        finally:
+            if current_parent_descriptor >= 0:
+                os.close(current_parent_descriptor)
+
+    def _write_creation(self, creation: _ValidatedCreation) -> None:
+        """Create the new file atomically without ever clobbering a neighbor.
+
+        The full content is written and fsynced into a temporary file, which is
+        then hard-linked onto the target name.  ``os.link`` fails atomically
+        when a file of that name appeared meanwhile, so the write can never
+        overwrite an unanticipated file, and a successful link guarantees the
+        target holds complete, durable content.
+        """
+
+        temporary_name: str | None = None
+        is_creation_uncertain = False
+        try:
+            temporary_name, temporary_descriptor = create_replacement_temporary_file(
+                creation.parent.parent_descriptor,
+                creation.parent.leaf_name,
+            )
+            try:
+                _write_all(
+                    temporary_descriptor, creation.replacement_content.encode("utf-8")
+                )
+                os.fchmod(temporary_descriptor, 0o644)
+                os.fsync(temporary_descriptor)
+            finally:
+                os.close(temporary_descriptor)
+
+            self._verify_create_route_is_current(creation)
+            try:
+                # Once linking starts, an exception may arrive after the target
+                # was published. Only an explicit collision proves no creation.
+                is_creation_uncertain = True
+                os.link(
+                    temporary_name,
+                    creation.parent.leaf_name,
+                    src_dir_fd=creation.parent.parent_descriptor,
+                    dst_dir_fd=creation.parent.parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileExistsError as error:
+                # The link was refused atomically; the workspace is untouched.
+                is_creation_uncertain = False
+                raise ToolError(
+                    "target_exists", "Target already exists"
+                ) from error
+            # The target name now exists; the temporary link below is dropped
+            # in the finally block so exactly one name remains.
+            self._sync_directory(creation.parent.parent_descriptor)
+        except BaseException as error:
+            if is_creation_uncertain:
+                raise ToolError(
+                    "write_status_unknown",
+                    "File creation may have succeeded, but its durable status "
+                    "could not be confirmed",
+                ) from error
+            if isinstance(error, ToolError):
+                raise
+            if isinstance(error, OSError):
+                raise ToolError("write_failed", "Could not create target file") from error
+            raise
+        finally:
+            if temporary_name is not None:
+                try:
+                    os.unlink(
+                        temporary_name,
+                        dir_fd=creation.parent.parent_descriptor,
+                    )
+                except OSError as error:
+                    if is_creation_uncertain:
+                        raise ToolError(
+                            "write_status_unknown",
+                            "File creation may have succeeded, but its durable "
+                            "status could not be confirmed",
+                        ) from error
+                    raise ToolError(
+                        "write_failed", "Could not create target file"
+                    ) from error
 
     def _write_replacement(self, replacement: _ValidatedReplacement) -> None:
         temporary_name: str | None = None

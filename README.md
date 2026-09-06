@@ -27,8 +27,8 @@ v0.1 release:
 - append-only JSONL events with truncated-tail recovery;
 - single-writer session create, resume, inspect, and stop;
 - interrupted/unknown tool-call recovery without automatic replay;
-- bounded workspace reads and search;
-- one-file, expected-content `apply_patch`;
+- bounded workspace reads, directory listing, and search;
+- one-file `apply_patch` with expected-content replacement or exclusive creation;
 - explicit-argv `exec_command` with no shell expansion;
 - approval events persisted before any write or command starts;
 - redacted artifacts plus bounded session-history retrieval;
@@ -126,6 +126,7 @@ already available from a public index.
 mini-agent                                      # chat in the current directory
 mini-agent init-config --workspace /path/to/project
 mini-agent chat --workspace /path/to/project
+mini-agent run "Review this project" --workspace /path/to/project --json
 mini-agent sessions --workspace /path/to/project
 mini-agent resume                               # latest active session here
 mini-agent resume SESSION_ID --workspace /path/to/project
@@ -133,6 +134,18 @@ mini-agent inspect SESSION_ID --workspace /path/to/project
 mini-agent evaluate SESSION_ID --fixture fixture.json --output report.json
 mini-agent benchmark --output benchmark.json
 ```
+
+`mini-agent run` executes one non-interactive turn. It denies writes and commands
+unless `--auto-approve` is supplied, which approves each action once. Its JSON
+result reports the turn outcome, tool counts, current goal status, and reported
+token usage for main-model completions in that turn. Missing or incomplete usage
+fields remain `null`. A completed turn does not certify task correctness; cleanup
+failures return a nonzero exit status. Large tool outputs remain retrievable as
+artifacts, as in interactive chat.
+
+`apply_patch` creates a file when `expected_content` is omitted or `null`. The
+parent directory must already exist and the target must be absent. Creations
+require one-time approval and do not grant future replacements at that path.
 
 Running `mini-agent` without a subcommand is equivalent to
 `mini-agent chat --workspace .`. The explicit `chat` command remains available

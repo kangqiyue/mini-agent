@@ -36,7 +36,7 @@ lifecycle boundaries; it does not decide agent actions.
 
 | Capability | Primary modules | Responsibility |
 |---|---|---|
-| Entry points | `cli.py`, `terminal_ui.py`, `storage_paths.py` | Commands, local rendering, config/session selection |
+| Entry points | `cli.py`, `headless.py`, `terminal_ui.py`, `storage_paths.py` | Commands, one-turn headless execution and reporting, local rendering, config/session selection |
 | Orchestration | `agent.py` | Turn loop, provider-call budget, tool ordering, context transitions |
 | Request context | `context.py`, `system_prompt.py` | Conservative request sizing, projections, provider-facing prompt |
 | Provider boundary | `provider.py`, `providers/openai_compatible.py`, `messages.py` | Canonical requests/responses and bounded external protocol parsing |
@@ -92,8 +92,14 @@ rebuild_started ─────► rebuild_completed | rebuild_failed
 
 - A model start has one matching terminal event. Resume records an interrupted
   request as a non-retryable model failure; it never invents a response.
+- Assistant events optionally retain validated provider token usage. Headless
+  totals cover only the current turn's main-model responses; missing counts
+  stay unknown rather than contributing zero to a partial total.
 - A tool terminal is unique. A started non-read-only tool without a terminal is
   recovered as `unknown` and is never automatically replayed.
+- File creation publishes complete content with an exclusive link in an
+  existing workspace directory. Once publication starts, an ambiguous failure
+  is `unknown`; a target collision never overwrites the concurrent file.
 - A checkpoint commit must match its immutable stored content, version, and
   watermark. Failure does not advance the visible checkpoint.
 - On reopen, durable checkpoint registrations are validated before any cleanup.

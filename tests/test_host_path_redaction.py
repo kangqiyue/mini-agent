@@ -223,6 +223,7 @@ def test_redact_host_paths_keeps_linux_case_variants_as_ordinary_text(
     result = redact_host_paths(
         f"path={case_variant}/result.txt",
         workspace_root=workspace,
+        home_directory=tmp_path / "unrelated-home",
     )
 
     assert result.text == f"path={case_variant}/result.txt"

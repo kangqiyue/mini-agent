@@ -52,6 +52,7 @@ from mini_agent.goal import (
     GoalState,
     GoalStatus,
 )
+from mini_agent.headless import HeadlessResult, run_headless_task
 from mini_agent.history import SessionHistory
 from mini_agent.host_path_redaction import (
     normalize_conversation_message_host_paths,
@@ -79,6 +80,7 @@ from mini_agent.tools.base import ToolDefinition
 from mini_agent.tools.exec_command import ExecCommandTool
 from mini_agent.tools.history_read import HistoryReadTool
 from mini_agent.tools.history_search import HistorySearchTool
+from mini_agent.tools.list_directory import ListDirectoryTool
 from mini_agent.tools.read_file import ReadFileTool
 from mini_agent.tools.registry import ToolRegistry
 from mini_agent.tools.search import SearchTool
@@ -181,6 +183,164 @@ def init_config(workspace: WorkspaceOption = None) -> None:
             param_hint="--workspace",
         ) from None
     typer.echo("Created .mini-agent/config.toml in the selected workspace.")
+
+
+@app.command()
+def run(
+    task: Annotated[
+        str,
+        typer.Argument(help="Task text for one non-interactive agent turn."),
+    ],
+    workspace: WorkspaceOption = None,
+    config_path: ConfigOption = None,
+    trust_workspace_config: TrustOption = False,
+    auto_approve: Annotated[
+        bool,
+        typer.Option(
+            "--auto-approve",
+            help=(
+                "Approve every tool action once. Use only in a sandboxed or "
+                "disposable workspace; without it, non-read-only actions are denied."
+            ),
+        ),
+    ] = False,
+    output_json: Annotated[
+        bool,
+        typer.Option("--json", help="Print one machine-readable JSON result line."),
+    ] = False,
+) -> None:
+    """Run one task non-interactively and report mechanical facts."""
+
+    resolved_workspace = _resolve_workspace(workspace)
+    config = _load_runtime_config(
+        resolved_workspace, config_path, trust_workspace_config=trust_workspace_config
+    )
+    result: HeadlessResult
+    try:
+        result = asyncio.run(
+            _run_headless(config, resolved_workspace, task, auto_approve=auto_approve)
+        )
+    except ProviderError as error:
+        _raise_cli_error(
+            safe_terminal_text(f"Provider error [{error.code}]: {error}")
+        )
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        _raise_cli_error("Interrupted; the session was stopped and remains resumable.")
+    except Exception:
+        _raise_cli_error("Headless task failed; resume the session before continuing.")
+    if output_json:
+        typer.echo(result.model_dump_json())
+    else:
+        _echo_headless_result(result)
+    if result.stop_reason != "completed":
+        raise typer.Exit(code=1)
+
+
+async def _run_headless(
+    config: MiniAgentConfig,
+    workspace: Path,
+    task: str,
+    *,
+    auto_approve: bool,
+) -> HeadlessResult:
+    """Run one turn with the same tool/session boundaries as interactive chat."""
+
+    provider = OpenAICompatibleProvider(config.model)
+    session = AgentSession.create(
+        data_dir=resolve_data_dir(config),
+        workspace=workspace,
+        model=config.model.model,
+    )
+    stop_reason = "headless_turn_failure"
+    has_cleanup_failure = False
+    try:
+        agent_workspace = build_workspace_for_session(config, session)
+        artifacts = ArtifactStore.open(
+            session.paths.root,
+            registrations=(),
+            workspace_root=Path(session.metadata.workspace),
+        )
+
+        def current_history() -> SessionHistory:
+            return SessionHistory(
+                session.events,
+                workspace_root=Path(session.metadata.workspace),
+            )
+
+        tools = ToolRegistry(
+            (
+                ReadFileTool(agent_workspace),
+                ListDirectoryTool(agent_workspace),
+                SearchTool(agent_workspace),
+                HistorySearchTool(current_history),
+                HistoryReadTool(current_history),
+                ArtifactReadTool(artifacts),
+                ApplyPatchTool(agent_workspace),
+                ExecCommandTool(agent_workspace),
+            )
+        )
+        result = await run_headless_task(
+            config=config,
+            provider=provider,
+            session=session,
+            tools=tools,
+            task=task,
+            auto_approve=auto_approve,
+            artifacts=artifacts,
+            response_sanitizer=safe_terminal_text,
+        )
+        stop_reason = f"headless_{result.stop_reason}"
+    finally:
+        try:
+            await provider.aclose()
+        except Exception:
+            has_cleanup_failure = True
+            typer.echo(
+                "Agent cleanup failed; resume the session before continuing.",
+                err=True,
+            )
+        try:
+            session.stop(stop_reason)
+        except (EventStoreCorruptionError, OSError, RuntimeError, UnicodeError, ValueError):
+            has_cleanup_failure = True
+            typer.echo(
+                "Session state could not be finalized; resume the session before "
+                "continuing.",
+                err=True,
+            )
+        try:
+            session.close()
+        except Exception:
+            has_cleanup_failure = True
+            typer.echo(
+                "Session cleanup failed; resume the session before continuing.",
+                err=True,
+            )
+
+    if has_cleanup_failure:
+        raise RuntimeError("Headless cleanup failed; resume the session before continuing")
+    return result
+
+
+def _echo_headless_result(result: HeadlessResult) -> None:
+    typer.echo(f"session: {result.session_id}")
+    typer.echo(f"stop_reason: {result.stop_reason}")
+    typer.echo(f"duration: {result.duration_seconds:.3f}s")
+    typer.echo(f"tool_calls: {result.tool_calls} (failures: {result.tool_failures})")
+    if any(
+        value is not None
+        for value in (result.prompt_tokens, result.completion_tokens, result.total_tokens)
+    ):
+        typer.echo(
+            "tokens: "
+            f"prompt={result.prompt_tokens} "
+            f"completion={result.completion_tokens} total={result.total_tokens}"
+        )
+    if result.goal_status is not None:
+        typer.echo(f"goal: {result.goal_status}")
+    if result.response_text is not None:
+        typer.echo("response:")
+        typer.echo(result.response_text)
 
 
 @app.command()
@@ -743,6 +903,7 @@ def _pending_tool_definitions(
     empty_history = SessionHistory(())
     return (
         ReadFileTool(workspace).definition,
+        ListDirectoryTool(workspace).definition,
         SearchTool(workspace).definition,
         HistorySearchTool(lambda: empty_history).definition,
         HistoryReadTool(lambda: empty_history).definition,
@@ -839,6 +1000,7 @@ async def _run_interactive(
     tools = ToolRegistry(
         (
             ReadFileTool(workspace),
+            ListDirectoryTool(workspace),
             SearchTool(workspace),
             HistorySearchTool(current_history),
             HistoryReadTool(current_history),

@@ -13,6 +13,7 @@ from mini_agent.goal import (
 )
 from mini_agent.messages import (
     FinishReason,
+    TokenUsage,
     ToolCall,
     validate_tool_call_id,
     validate_tool_name,
@@ -133,6 +134,7 @@ class AssistantMessageData(EventDataBase):
     content: str | None = None
     tool_calls: tuple[ToolCall, ...] = ()
     finish_reason: FinishReason
+    usage: TokenUsage | None = None
 
     @model_validator(mode="after")
     def require_content_or_tool_calls(self) -> Self:

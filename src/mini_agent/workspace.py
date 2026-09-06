@@ -120,6 +120,30 @@ class Workspace:
         self._require_not_runtime_sensitive(resolved_path)
         return resolved_path.relative_to(self.root).as_posix()
 
+    def resolve_creatable_file_path(self, relative_path: str) -> Path:
+        """Validate one workspace-relative file path whose file does not exist yet.
+
+        Applies the same policy as :meth:`resolve_existing` with existence
+        required of the parent directory instead of the leaf: syntactic
+        constraints, the lexical runtime-sensitive set, a resolved non-excluded
+        parent, and no symlink component anywhere on the route.  Returns the
+        fully resolved parent directory path.
+        """
+
+        requested_path = self._require_relative_path(relative_path)
+        self._require_not_runtime_sensitive_lexical(requested_path)
+        if self.has_symlink_component(relative_path):
+            raise WorkspacePathError("Workspace tools do not allow symlink paths")
+        parent = requested_path.parent
+        parent_relative = "." if str(parent) == "." else parent.as_posix()
+        resolved_parent = self.resolve_existing(parent_relative, allow_directory=True)
+        if not resolved_parent.is_dir():
+            raise WorkspacePathError("Workspace file parent must be a directory")
+        target = resolved_parent / requested_path.name
+        self._require_not_excluded(target)
+        self._require_not_runtime_sensitive(target)
+        return resolved_parent
+
     def has_symlink_component(self, relative_path: str) -> bool:
         """Whether any existing lexical component below the root is a symlink."""
 

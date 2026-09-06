@@ -573,3 +573,81 @@ async def test_complete_serializes_tool_definitions(monkeypatch: pytest.MonkeyPa
     await provider.complete(request)
 
     await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_complete_reports_provider_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TEST_MINI_AGENT_KEY", "test-value")
+
+    def respond(http_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "world"}, "finish_reason": "stop"}],
+                "usage": {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 7,
+                    "total_tokens": 18,
+                },
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    provider = OpenAICompatibleProvider(_config(), client=client)
+
+    response = await provider.complete(_request())
+
+    assert response.usage is not None
+    assert response.usage.prompt_tokens == 11
+    assert response.usage.completion_tokens == 7
+    assert response.usage.total_tokens == 18
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "usage_payload",
+    (None, {}, {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}),
+)
+async def test_complete_reports_null_usage_when_provider_sends_none(
+    monkeypatch: pytest.MonkeyPatch,
+    usage_payload: dict[str, object] | None,
+) -> None:
+    monkeypatch.setenv("TEST_MINI_AGENT_KEY", "test-value")
+    body: dict[str, object] = {
+        "choices": [{"message": {"content": "world"}, "finish_reason": "stop"}],
+    }
+    if usage_payload is not None:
+        body["usage"] = usage_payload
+
+    def respond(http_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=body)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    provider = OpenAICompatibleProvider(_config(), client=client)
+
+    response = await provider.complete(_request())
+
+    assert response.usage is None
+    await client.aclose()
+
+
+@pytest.mark.parametrize("invalid_count", [-1, "not-a-count", []])
+async def test_complete_rejects_invalid_usage_without_exposing_payload(
+    monkeypatch: pytest.MonkeyPatch, invalid_count: object
+) -> None:
+    monkeypatch.setenv("TEST_MINI_AGENT_KEY", "test-value")
+
+    def respond(http_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "world"}, "finish_reason": "stop"}],
+            "usage": {"total_tokens": invalid_count},
+        })
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        provider = OpenAICompatibleProvider(_config(), client=client)
+        with pytest.raises(ProviderError) as error_info:
+            await provider.complete(_request())
+
+    assert error_info.value.code == "invalid_provider_response"
+    assert error_info.value.__context__ is None

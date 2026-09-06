@@ -58,7 +58,13 @@ from mini_agent.goal import (
     evaluate_completion_gate,
     validate_goal_lifecycle,
 )
-from mini_agent.messages import ConversationMessage, FinishReason, MessageRole, ToolCall
+from mini_agent.messages import (
+    ConversationMessage,
+    FinishReason,
+    MessageRole,
+    TokenUsage,
+    ToolCall,
+)
 from mini_agent.permissions import is_persisted_apply_patch_session_grant
 from mini_agent.provider import ProviderError
 from mini_agent.redaction import redact_text
@@ -496,11 +502,13 @@ class AgentSession:
         finish_reason: FinishReason,
         tool_calls: tuple[ToolCall, ...] = (),
         turn_id: str,
+        usage: TokenUsage | None = None,
     ) -> StoredEvent:
         assistant_data = AssistantMessageData(
             content=content,
             tool_calls=tool_calls,
             finish_reason=finish_reason,
+            usage=usage,
         )
         existing_tool_call_ids = {
             tool_call.id

@@ -332,6 +332,7 @@ class MiniAgent:
                     finish_reason=path_safe_response.finish_reason,
                     tool_calls=durable_tool_calls,
                     turn_id=turn_id,
+                    usage=path_safe_response.usage,
                 )
             except BaseException:
                 # The provider may have completed but its durable terminal is

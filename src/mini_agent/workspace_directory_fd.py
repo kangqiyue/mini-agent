@@ -294,7 +294,14 @@ def _directory_open_flags() -> int:
 
 
 def _file_open_flags() -> int:
-    return os.O_RDONLY | _required_os_flag("O_NOFOLLOW") | _close_on_exec_flag()
+    # A regular file can be replaced by a FIFO after path validation. Open
+    # without waiting for a writer so fstat can reject non-regular objects.
+    return (
+        os.O_RDONLY
+        | _required_os_flag("O_NOFOLLOW")
+        | _required_os_flag("O_NONBLOCK")
+        | _close_on_exec_flag()
+    )
 
 
 def _close_on_exec_flag() -> int:

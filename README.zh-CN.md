@@ -23,7 +23,7 @@ Mini Agent 是一个小型、可观测的本地编程 Agent，用于探索长程
 - 单写入者的会话创建、恢复、检查和停止；
 - 对中断或结果未知的工具调用进行恢复，且不自动重放；
 - 有界的工作区文件读取和搜索；
-- 基于预期内容、一次只修改一个文件的 `apply_patch`；
+- 有界目录列表，以及一次只修改或新建一个文件的 `apply_patch`；替换现有文件时校验预期内容；
 - 使用显式 `argv`、不进行 shell 展开的 `exec_command`；
 - 在任何写入或命令开始前持久化审批事件；
 - 脱敏后的 Artifact，以及有界的会话历史检索；
@@ -103,6 +103,7 @@ mini-agent --help
 mini-agent                                      # 在当前目录启动对话
 mini-agent init-config --workspace /path/to/project
 mini-agent chat --workspace /path/to/project
+mini-agent run "Review this project" --workspace /path/to/project --json
 mini-agent sessions --workspace /path/to/project
 mini-agent resume                                # 恢复当前工作区最近活动的会话
 mini-agent resume SESSION_ID --workspace /path/to/project
@@ -110,6 +111,10 @@ mini-agent inspect SESSION_ID --workspace /path/to/project
 mini-agent evaluate SESSION_ID --fixture fixture.json --output report.json
 mini-agent benchmark --output benchmark.json
 ```
+
+`mini-agent run` 执行一个非交互回合，默认拒绝文件写入和命令执行；添加 `--auto-approve` 后逐次批准这些操作。JSON 结果包含回合结束原因、工具调用数量、当前 Goal 状态，以及本回合主模型响应上报的 Token 用量。缺失或不完整的用量字段保持 `null`。回合结束并不代表任务通过验收；清理或会话收尾失败时返回非零退出码。较长的工具输出与交互模式一样保存为可检索的 Artifact。
+
+`apply_patch` 的 `expected_content` 省略或为 `null` 时表示新建文件：父目录必须已存在，目标文件必须不存在。新建操作需要单次批准，不会授权日后替换同一路径的文件。
 
 不带子命令运行 `mini-agent`，等价于 `mini-agent chat --workspace .`。为了兼容脚本，以及需要选择其他工作区的场景，显式的 `chat` 子命令仍然保留。
 

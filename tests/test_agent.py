@@ -45,6 +45,7 @@ from mini_agent.messages import (
     FinishReason,
     ModelRequest,
     ModelResponse,
+    TokenUsage,
     ToolCall,
 )
 from mini_agent.permissions import ApprovalPrompt, ApprovalRequest, PermissionController
@@ -337,6 +338,73 @@ async def test_run_turn_serializes_concurrent_calls(tmp_path: Path) -> None:
 
     assert provider.max_concurrency == 1
     session.close()
+
+
+@pytest.mark.asyncio
+async def test_run_turn_persists_provider_usage_on_assistant_event(tmp_path: Path) -> None:
+    session = AgentSession.create(data_dir=tmp_path / "data", workspace=tmp_path, model="m")
+    provider = SequenceProvider(
+        [
+            ModelResponse(
+                content="counted",
+                finish_reason=FinishReason.STOP,
+                usage=TokenUsage(prompt_tokens=11, completion_tokens=7, total_tokens=18),
+            )
+        ]
+    )
+    agent = MiniAgent(config=_config(tmp_path), provider=provider, session=session)
+
+    await agent.run_turn("say counted")
+
+    assistant_events = [
+        event
+        for event in session.events
+        if isinstance(event.data, AssistantMessageData)
+    ]
+    assert len(assistant_events) == 1
+    assert isinstance(assistant_events[0].data, AssistantMessageData)
+    assert assistant_events[0].data.usage == TokenUsage(
+        prompt_tokens=11, completion_tokens=7, total_tokens=18
+    )
+    session.close()
+
+
+@pytest.mark.asyncio
+async def test_run_turn_persists_events_without_usage_forever_valid(
+    tmp_path: Path,
+) -> None:
+    # Responses from providers that report no usage must keep producing
+    # assistant events (usage defaults to None), and old records without the
+    # field must remain loadable.
+    session = AgentSession.create(data_dir=tmp_path / "data", workspace=tmp_path, model="m")
+    provider = SequenceProvider(
+        [ModelResponse(content="answer", finish_reason=FinishReason.STOP)]
+    )
+    agent = MiniAgent(config=_config(tmp_path), provider=provider, session=session)
+
+    await agent.run_turn("hi")
+
+    assistant_events = [
+        event
+        for event in session.events
+        if isinstance(event.data, AssistantMessageData)
+    ]
+    assert len(assistant_events) == 1
+    assert isinstance(assistant_events[0].data, AssistantMessageData)
+    assert assistant_events[0].data.usage is None
+    session.close()
+
+    reopened = AgentSession.load(
+        data_dir=tmp_path / "data", session_id=session.metadata.session_id
+    )
+    reloaded_assistant = next(
+        event
+        for event in reopened.events
+        if isinstance(event.data, AssistantMessageData)
+    )
+    assert isinstance(reloaded_assistant.data, AssistantMessageData)
+    assert reloaded_assistant.data.usage is None
+    reopened.close()
 
 
 def test_constructor_rejects_an_unsendable_base_request_before_checkpoint_side_effects(

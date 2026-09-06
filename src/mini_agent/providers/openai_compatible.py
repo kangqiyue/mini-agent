@@ -17,6 +17,7 @@ from mini_agent.messages import (
     MessageRole,
     ModelRequest,
     ModelResponse,
+    TokenUsage,
     ToolCall,
 )
 from mini_agent.provider import ProviderCapabilities, ProviderError
@@ -55,10 +56,19 @@ class _ResponseChoice(BaseModel):
     finish_reason: str | None = None
 
 
+class _ResponseUsage(BaseModel):
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    prompt_tokens: int | None = Field(default=None, ge=0)
+    completion_tokens: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+
+
 class _ChatCompletionResponse(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
     choices: tuple[_ResponseChoice, ...] = Field(min_length=1)
+    usage: _ResponseUsage | None = None
 
 
 class OpenAICompatibleProvider:
@@ -204,6 +214,7 @@ class OpenAICompatibleProvider:
                 content=choice.message.content,
                 tool_calls=tool_calls,
                 finish_reason=_finish_reason(choice.finish_reason),
+                usage=_usage(parsed_response.usage),
             )
         except (ValidationError, ValueError, RecursionError):
             response_conversion_failure = ProviderError(
@@ -286,6 +297,24 @@ async def _read_bounded_response(
             )
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+def _usage(raw_usage: _ResponseUsage | None) -> TokenUsage | None:
+    """Normalize provider usage once; report None when nothing was reported."""
+
+    if raw_usage is None:
+        return None
+    if (
+        raw_usage.prompt_tokens is None
+        and raw_usage.completion_tokens is None
+        and raw_usage.total_tokens is None
+    ):
+        return None
+    return TokenUsage(
+        prompt_tokens=raw_usage.prompt_tokens,
+        completion_tokens=raw_usage.completion_tokens,
+        total_tokens=raw_usage.total_tokens,
+    )
 
 
 def _finish_reason(value: str | None) -> FinishReason:

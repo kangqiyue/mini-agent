@@ -151,12 +151,23 @@ class ModelRequest(BaseModel):
         return self
 
 
+class TokenUsage(BaseModel):
+    """Provider-reported token accounting for one completion, when available."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    prompt_tokens: int | None = Field(default=None, ge=0)
+    completion_tokens: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+
+
 class ModelResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     content: str | None = None
     tool_calls: tuple[ToolCall, ...] = Field(max_length=MAX_TOOL_CALLS_PER_RESPONSE, default=())
     finish_reason: FinishReason = FinishReason.STOP
+    usage: TokenUsage | None = None
 
     @model_validator(mode="after")
     def require_content_or_tool_calls(self) -> Self:
